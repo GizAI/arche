@@ -28,7 +28,7 @@ STATE = "state.json"
 INFINITE = "infinite"
 FORCE_REVIEW = "force_review"
 FORCE_RETRO = "force_retro"
-BATCH_MODE = "batch"
+STEP_MODE = "step"
 PROJECT_RULES = "PROJECT_RULES.md"
 
 app = FastAPI(
@@ -89,7 +89,7 @@ class StartRequest(BaseModel):
     model: Optional[str] = None
     plan: bool = False
     infinite: bool = False
-    batch: bool = False
+    step: bool = False
     retro_every: str = "auto"
 
 
@@ -216,8 +216,8 @@ async def get_status(_: bool = Depends(verify_password)):
     running, pid = is_running()
     state = read_state()
     mode = "infinite" if config.arche_dir and (config.arche_dir / INFINITE).exists() else "task"
-    if config.arche_dir and (config.arche_dir / BATCH_MODE).exists():
-        mode += " batch"
+    if config.arche_dir and (config.arche_dir / STEP_MODE).exists():
+        mode += " step"
 
     return StatusResponse(
         running=running,
@@ -260,10 +260,10 @@ async def start_agent(req: StartRequest, _: bool = Depends(verify_password)):
         (config.arche_dir / INFINITE).touch()
     else:
         (config.arche_dir / INFINITE).unlink(missing_ok=True)
-    if req.batch:
-        (config.arche_dir / BATCH_MODE).touch()
+    if req.step:
+        (config.arche_dir / STEP_MODE).touch()
     else:
-        (config.arche_dir / BATCH_MODE).unlink(missing_ok=True)
+        (config.arche_dir / STEP_MODE).unlink(missing_ok=True)
 
     # Clear log and start
     (config.arche_dir / LOG).write_text(f"Started: {datetime.now().isoformat()}\nGoal: {req.goal}\nEngine: {req.engine}\n")
@@ -494,7 +494,7 @@ async def run_agent_loop(goal: str | None):
     from arche.cli import (
         build_system_prompt, build_user_prompt, parse_reviewer_json,
         read_goal_from_plan, read_state as cli_read_state, write_state as cli_write_state,
-        INFINITE, FORCE_REVIEW, FORCE_RETRO, BATCH_MODE, PID, LOG
+        INFINITE, FORCE_REVIEW, FORCE_RETRO, STEP_MODE, PID, LOG
     )
 
     if not config.arche_dir or not config.project_root:

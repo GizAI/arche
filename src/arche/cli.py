@@ -28,7 +28,7 @@ app = typer.Typer(
 LOG, PID, STATE = "arche.log", "arche.pid", "state.json"
 RULE_EXEC, RULE_REVIEW, RULE_RETRO, RULE_COMMON, PROMPT = "RULE_EXEC.md", "RULE_REVIEW.md", "RULE_RETRO.md", "RULE_COMMON.md", "PROMPT.md"
 PROJECT_RULES = "PROJECT_RULES.md"
-INFINITE, FORCE_REVIEW, FORCE_RETRO, BATCH_MODE = "infinite", "force_review", "force_retro", "batch"
+INFINITE, FORCE_REVIEW, FORCE_RETRO, STEP_MODE = "infinite", "force_review", "force_retro", "step"
 PKG_DIR = Path(__file__).parent
 
 # Default state
@@ -144,7 +144,7 @@ def parse_reviewer_json(output: str) -> dict | None:
 def build_system_prompt(arche_dir: Path, mode: str) -> str:
     """Build system prompt from templates. mode: 'plan', 'exec', 'review', 'retro'"""
     infinite = (arche_dir / INFINITE).exists()
-    batch = (arche_dir / BATCH_MODE).exists()
+    step = (arche_dir / STEP_MODE).exists()
     tools = list_tools(arche_dir)
     now = datetime.now()
     plan_mode = (mode == "plan")
@@ -158,7 +158,7 @@ def build_system_prompt(arche_dir: Path, mode: str) -> str:
     rule_name = rule_map.get(mode, RULE_EXEC)
     rule_content = read_file(arche_dir / rule_name) or read_file(PKG_DIR / rule_name)
 
-    prompt = Template(rule_content).render(infinite=infinite, batch=batch, common=common, plan_mode=plan_mode)
+    prompt = Template(rule_content).render(infinite=infinite, step=step, common=common, plan_mode=plan_mode)
     return f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n{prompt}"
 
 
@@ -217,8 +217,9 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
     retro_every = int(retro_config) if str(retro_config).isdigit() else 0  # auto or off = 0 (plan-driven)
     turn = state.get("turn", 1)
     plan_mode = state.get("plan_mode", False)  # True if started with --plan
-    goal = goal or read_goal_from_plan(arche_dir)
-    next_task, journal_file = None, None
+    goal = goal or state.get("goal") or read_goal_from_plan(arche_dir)
+    next_task = state.get("next_task")
+    journal_file = state.get("journal_file")
 
     # Engine config (engine created per turn with appropriate permission_mode)
     engine_cfg = state.get("engine", {})
@@ -294,16 +295,25 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
                         f.flush()
                         last_was_tool = False
 
-                if mode in ("review", "retro"):
+                if mode in ("review", "retro", "plan"):
                     if resp := parse_reviewer_json(output):
                         f.write(f"\n*** {mode.upper()}: {resp} ***\n")
                         if not infinite and resp.get("status") == "done":
                             f.write("\n*** Done ***\n")
                             break
                         next_task, journal_file = resp.get("next_task"), resp.get("journal_file")
+                        # Save to state for resume
+                        state["next_task"] = next_task
+                        state["journal_file"] = journal_file
+                        write_state(arche_dir, state)
                     else:
                         f.write(f"\n*** Warning: No {mode} JSON ***\n")
                         next_task, journal_file = None, None
+                else:
+                    # exec 완료 후 next_task 초기화
+                    state["next_task"] = None
+                    state["journal_file"] = None
+                    write_state(arche_dir, state)
 
                 turn += 1
                 await asyncio.sleep(1)
@@ -373,7 +383,7 @@ def start(
     model: str = typer.Option(None, "-m", "--model", help="Model to use"),
     plan: bool = typer.Option(False, "-p", "--plan", help="Start with plan mode first"),
     infinite: bool = typer.Option(False, "-i", "--infinite", help="Run infinitely"),
-    batch: bool = typer.Option(False, "-b", "--batch", help="Exec all tasks at once"),
+    step: bool = typer.Option(False, "-s", "--step", help="Process one task at a time"),
     retro_every: str = typer.Option("auto", "-r", "--retro-every", help="Retro schedule: auto, N (every N turns), off"),
     force: bool = typer.Option(False, "-f", "--force", help="Restart if running"),
 ):
@@ -418,6 +428,7 @@ def start(
     # Write state
     engine_kwargs = {"model": model} if model else {}
     write_state(arche_dir, {
+        "goal": goal_str,
         "engine": {"type": engine, "kwargs": engine_kwargs},
         "retro_every": retro_every,
         "turn": 1,
@@ -425,7 +436,7 @@ def start(
     })
 
     (arche_dir / INFINITE).touch() if infinite else (arche_dir / INFINITE).unlink(missing_ok=True)
-    (arche_dir / BATCH_MODE).touch() if batch else (arche_dir / BATCH_MODE).unlink(missing_ok=True)
+    (arche_dir / STEP_MODE).touch() if step else (arche_dir / STEP_MODE).unlink(missing_ok=True)
     (arche_dir / LOG).write_text(f"Started: {datetime.now().isoformat()}\nGoal: {goal_str}\nEngine: {engine}\n")
 
     typer.echo(f"Goal: {goal_str}")
@@ -457,20 +468,37 @@ def stop():
 
 
 @app.command()
-def resume():
-    """Resume Arche (starts with review mode)."""
+def resume(
+    review: bool = typer.Option(False, "-r", "--review", help="Force review mode"),
+    retro: bool = typer.Option(False, "-R", "--retro", help="Force retrospective mode"),
+):
+    """Resume Arche from where it stopped.
+
+    Without flags: continues from last turn.
+    With --review: forces review mode.
+    With --retro: forces retrospective mode.
+    """
     arche_dir = get_arche_dir()
     running, pid = is_running(arche_dir)
     if running:
         typer.echo(f"Already running (PID {pid}).")
         return tail_log(arche_dir)
 
-    (arche_dir / FORCE_REVIEW).touch()
+    state = read_state(arche_dir)
+    turn = state.get("turn", 1)
 
+    # Set force mode flag if specified
+    mode_str = ""
+    if review:
+        (arche_dir / FORCE_REVIEW).touch()
+        mode_str = " (review mode)"
+    elif retro:
+        (arche_dir / FORCE_RETRO).touch()
+        mode_str = " (retro mode)"
     with open(arche_dir / LOG, "a") as f:
-        f.write(f"\n{'='*50}\nResumed: {datetime.now().isoformat()}\n{'='*50}\n")
+        f.write(f"\n{'='*50}\nResumed: {datetime.now().isoformat()} (turn {turn}){mode_str}\n{'='*50}\n")
 
-    typer.echo("Resuming (review mode)...")
+    typer.echo(f"Resuming from turn {turn}{mode_str}...")
     start_daemon(arche_dir)
     time.sleep(0.5)
     tail_log(arche_dir)
@@ -505,7 +533,7 @@ def status():
 
     running, pid = is_running(arche_dir)
     state = read_state(arche_dir)
-    mode = ("infinite" if (arche_dir / INFINITE).exists() else "task") + (" batch" if (arche_dir / BATCH_MODE).exists() else "")
+    mode = ("infinite" if (arche_dir / INFINITE).exists() else "task") + (" step" if (arche_dir / STEP_MODE).exists() else "")
 
     typer.echo(f"Dir: {arche_dir}")
     typer.echo(f"Status: {'Running (PID ' + str(pid) + ')' if running else 'Stopped'}")
@@ -545,24 +573,6 @@ def feedback(
         start_daemon(arche_dir)
         time.sleep(0.5)
         tail_log(arche_dir)
-
-
-@app.command()
-def retro():
-    """Trigger retrospective mode."""
-    arche_dir = get_arche_dir()
-    (arche_dir / FORCE_RETRO).touch()
-
-    running, pid = is_running(arche_dir)
-    if running:
-        typer.echo(f"Interrupting PID {pid} for retro...")
-        kill_arche(pid)
-        time.sleep(1)
-
-    typer.echo("Starting retrospective...")
-    start_daemon(arche_dir)
-    time.sleep(0.5)
-    tail_log(arche_dir)
 
 
 @app.command()

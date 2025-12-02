@@ -23,23 +23,24 @@ arche start -m opus "Refactor authentication system"
 # Infinite mode (keeps finding new goals after completion)
 arche start --infinite "Improve this codebase"
 
-# Batch mode (exec all tasks at once)
-arche start --batch "Implement all API endpoints"
+# Step mode (one task at a time, careful review)
+arche start --step "Implement all API endpoints"
 ```
 
 ## Commands
 
 ```bash
-arche start <goal>     # Start new session
-arche stop             # Stop running agent
-arche resume           # Resume from where it stopped
-arche log              # View real-time logs (Ctrl+C to detach)
-arche log --no-follow  # View static log
-arche status           # Check if running
-arche feedback "msg"   # Send feedback to agent
-arche feedback "msg" --now  # Send feedback and trigger immediate review
-arche retro            # Trigger retrospective mode
-arche version          # Show version
+arche start <goal>       # Start new session
+arche stop               # Stop running agent
+arche resume             # Resume from last turn
+arche resume -r          # Resume with review mode
+arche resume -R          # Resume with retrospective mode
+arche log                # View real-time logs (Ctrl+C to detach)
+arche log --no-follow    # View static log
+arche status             # Check if running
+arche feedback "msg"     # Send feedback to agent
+arche feedback --now     # Send feedback and trigger immediate review
+arche version            # Show version
 ```
 
 ## Start Options
@@ -50,7 +51,7 @@ arche version          # Show version
 | `-e, --engine` | Engine: claude_sdk (default), deepagents, codex |
 | `-m, --model` | Model to use (e.g., opus, sonnet) |
 | `-i, --infinite` | Run infinitely, find new goals after completion |
-| `-b, --batch` | Execute all tasks at once |
+| `-s, --step` | Process one task at a time |
 | `-r, --retro-every` | Retro schedule: auto, N (every N turns), off |
 | `-f, --force` | Force restart if already running |
 
@@ -158,10 +159,13 @@ arche start -e deepagents "Build API"
 Session state is stored in `.arche/state.json`:
 ```json
 {
+  "goal": "Build a todo app with Vue3 and FastAPI",
   "engine": {"type": "claude_sdk", "kwargs": {"model": "opus"}},
   "retro_every": "auto",
   "turn": 5,
-  "plan_mode": true
+  "plan_mode": true,
+  "next_task": "Implement user authentication",
+  "journal_file": ".arche/journal/20241201-1430-auth.yaml"
 }
 ```
 

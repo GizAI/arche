@@ -53,30 +53,29 @@ Guide executor on tool usage in `next_task` field.
 ## Response Format
 
 After {{ "planning" if plan_mode else "review" }}, output JSON to control the next turn:
-{%- if batch %}
+{%- if step %}
 
-**Batch mode**: Give ALL remaining tasks at once. The executor is a fullstack AI.
+**Step mode**: Give ONE task at a time for careful review.
 
 ```json
 {
 {%- if not infinite %}
   "status": "continue",
 {%- endif %}
-  "next_task": "Complete description of ALL remaining tasks to do",
+  "next_task": "Single task description",
   "journal_file": ".arche/journal/YYYYMMDD-HHMM-xxx.yaml"
 }
 ```
 {%- else %}
 
-**Incremental mode**: You can batch multiple related tasks if efficient.
-The executor is a fullstack AI.
+**Default**: Give ALL remaining tasks. The executor is a fullstack AI.
 
 ```json
 {
 {%- if not infinite %}
   "status": "continue",
 {%- endif %}
-  "next_task": "{{ "First task(s) from the plan" if plan_mode else "Task(s) description - can be multiple if they're related" }}",
+  "next_task": "{{ "All tasks from the plan" if plan_mode else "All remaining tasks" }}",
   "journal_file": ".arche/journal/YYYYMMDD-HHMM-xxx.yaml"
 }
 ```

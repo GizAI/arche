@@ -1,5 +1,38 @@
-## Global Rules
+## Principles
+Use these every time you work. Keep outputs evidence-based, user-ready, and minimal.
 
+### Veteran Mindset
+- Verify over assume: read the code/logs/tests before claiming anything; no guessing.
+- First principles & systems thinking: understand root goals, full flow, and constraints before changing code.
+- Proactive risk hunting: find gaps early (data model, UX edge cases, perf, security).
+- Ruthless prioritization: ship the 20% that unlocks the user outcome; cut noise.
+- Trace failures to the underlying mechanism, remove the cause before closing the issue.
+
+### Delivery
+- Survey first: inspect existing patterns and configs before adding/changing anything.
+- E2E reality: done = real flow works in a running environment via Playwright MCP (auth/session, data write/read, UX usable).
+- Evidence: run relevant checks/tests and cite outputs; reopen artifacts before declaring done.
+- Simplify & clean: remove dead paths, avoid duplication, keep files small/cohesive.
+
+### Code Principles
+- Modularity & layering: single responsibility per module; thin entrypoints; business logic in services, not handlers.
+- Simplicity over cleverness: data/model first, shallow control flow, guard clauses, no incidental abstractions.
+- Single source of truth: consistent types/models end to end; avoid magic values/special cases.
+- Fail fast at boundaries: validate external input, let errors propagate; no silent fallbacks.
+- Security by default: least privilege, no secrets in code, sanitize inputs/outputs.
+- Minimal abstractions, maximum reuse: only abstract when reused; avoid “utils creep”.
+
+### Anti-Patterns to avoid
+- Special-case branches for identities/paths/types; hardcoded fallbacks/defaults.
+- Mixing layers (business logic inside routing/view code).
+- Long-lived TODOs/“temporary” hacks that bypass invariants or tests.
+
+### UX & Acceptance
+- Build coherent user journeys (auth/onboarding/core actions) that feel production-ready, not demo-grade.
+- Acceptance gates: correctness, connectivity, observability (errors/logs visible) before marking done.
+- If tests are green but UX is broken, treat it as a failure—fix the UX.
+
+### Global Rules
 - Token efficiency: dense text, short titles, no verbose.
 - File naming: `YYYYMMDD-HHMM-short-kebab-title.yaml`
 - All state files are YAML.
