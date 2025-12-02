@@ -23,7 +23,7 @@ app = typer.Typer(
 )
 
 # File names
-LOG, PID, RULE_EXEC, RULE_REVIEW, PROMPT = "arche.log", "arche.pid", "RULE_EXEC.md", "RULE_REVIEW.md", "PROMPT.md"
+LOG, PID, RULE_EXEC, RULE_REVIEW, RULE_COMMON, PROMPT = "arche.log", "arche.pid", "RULE_EXEC.md", "RULE_REVIEW.md", "RULE_COMMON.md", "PROMPT.md"
 INFINITE, FORCE_REVIEW, CLAUDE_ARGS, BATCH_MODE = "infinite", "force_review", "claude_args.json", "batch"
 PKG_DIR = Path(__file__).parent
 
@@ -73,6 +73,15 @@ def read_file(path: Path) -> str:
     return path.read_text() if path.exists() else ""
 
 
+def list_tools(arche_dir: Path) -> str:
+    """List tools in .arche/tools/ (filenames are self-descriptive)."""
+    tools_dir = arche_dir / "tools"
+    if not tools_dir.exists():
+        return ""
+    tools = [f.stem for f in sorted(tools_dir.glob("*.py"))]
+    return ", ".join(tools) if tools else ""
+
+
 def read_latest_journal(arche_dir: Path, journal_path: str | None = None) -> str:
     """Read specific or latest journal."""
     if journal_path and (arche_dir / journal_path).exists():
@@ -109,11 +118,13 @@ def build_cmd(turn: int, arche_dir: Path, goal: str | None, extra_args: list[str
     """Build claude CLI command."""
     infinite = (arche_dir / INFINITE).exists()
     batch = (arche_dir / BATCH_MODE).exists()
+    tools = list_tools(arche_dir)
     rule_file = arche_dir / (RULE_REVIEW if review_mode else RULE_EXEC)
+    common = Template(read_file(arche_dir / RULE_COMMON) or read_file(PKG_DIR / RULE_COMMON)).render(tools=tools)
 
     cmd = ["claude", "--print", "--permission-mode", "plan"]
     if rule_file.exists():
-        cmd.extend(["--system-prompt", Template(rule_file.read_text()).render(infinite=infinite, batch=batch)])
+        cmd.extend(["--system-prompt", Template(rule_file.read_text()).render(infinite=infinite, batch=batch, common=common)])
     if extra_args:
         cmd.extend(extra_args)
     cmd.append(build_prompt(turn, arche_dir, goal, review_mode, next_task, journal_file, resumed))
@@ -236,7 +247,7 @@ def start(
             time.sleep(1)
 
     arche_dir.mkdir(exist_ok=True)
-    for rf, rm in [(RULE_EXEC, False), (RULE_REVIEW, True)]:
+    for rf in [RULE_EXEC, RULE_REVIEW, RULE_COMMON]:
         dest = arche_dir / rf
         if not dest.exists() or force:
             dest.write_text(read_file(PKG_DIR / rf))
