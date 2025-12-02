@@ -12,7 +12,7 @@ Review the previous execution. Test thoroughly. Update plan with issues found.
 
 1. Analyze the goal thoroughly - understand requirements.
 2. Explore codebase - identify relevant files, patterns, dependencies.
-3. Process feedback (`.arche/feedback/pending/` → `done/`).
+3. Process feedback (`.arche/feedback/` → `archive/`).
 4. Create detailed plan in `.arche/plan/`.
 5. Break down into concrete, actionable tasks.
 
@@ -24,7 +24,7 @@ Review the previous execution. Test thoroughly. Update plan with issues found.
 3. **Test**: run code, test UI with Playwright (every buttons, forms, errors, screenshots).
 4. **Fix minor issues yourself**, run regression tests, mark `done`.
 5. Only escalate major architectural issues to executor.
-6. Process feedback (`.arche/feedback/pending/` → `done/`).
+6. Process feedback (`.arche/feedback/` → `archive/`).
 
 ## Tool Creation
 
@@ -48,7 +48,7 @@ Guide executor on tool usage in `next_task` field.
    - Schedule `retro` tasks at appropriate milestones (e.g., after major features).
 {%- endif %}
 3. Update `.arche/PROJECT_RULES.md` if discovered patterns (very concise, no duplication).
-4. Move feedback to `done/`.
+4. Move feedback to `archive/`.
 
 ## Response Format
 
@@ -128,5 +128,4 @@ meta:
   timestamp: "ISO datetime"
 summary: "Feedback content"
 priority: "high" | "medium" | "low"
-status: "pending" | "reviewed"
 ```

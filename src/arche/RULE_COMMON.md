@@ -9,7 +9,7 @@
 Directories inside `.arche/`:
 
 - `journal/` - per turn logs
-- `feedback/` - human input (`pending/`, `reviewed/`)
+- `feedback/` - human input (processed → `archive/`)
 - `plan/` - goals and tasks
 - `retrospective/` - periodic project retrospectives
 - `tools/` - reusable python tools

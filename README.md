@@ -108,9 +108,7 @@ your-project/
     ├── PROJECT_RULES.md       ← Project-specific rules (included in prompts)
     ├── journal/               ← Turn-by-turn logs (YAML)
     ├── plan/                  ← Goals and tasks (YAML)
-    ├── feedback/              ← Human feedback
-    │   ├── pending/
-    │   └── reviewed/
+    ├── feedback/              ← Human feedback (processed → archive/)
     ├── retrospective/         ← Periodic retrospectives
     └── tools/                 ← Reusable Python tools
 ```
@@ -129,7 +127,7 @@ arche feedback "Critical: fix login bug" -p high
 arche feedback "Review my changes" --now
 ```
 
-Agent processes feedback in `pending/` and moves to `reviewed/`.
+Agent processes feedback and moves to `archive/`.
 
 ## Project Rules
 

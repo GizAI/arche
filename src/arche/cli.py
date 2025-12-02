@@ -356,9 +356,19 @@ def tail_log(arche_dir: Path):
             typer.echo("\nArche has finished.", err=True)
 
 
+def reset_arche_dir(arche_dir: Path):
+    """Reset .arche/ directory, preserving PROJECT_RULES.md."""
+    import shutil
+    project_rules_content = read_file(arche_dir / PROJECT_RULES)
+    shutil.rmtree(arche_dir)
+    arche_dir.mkdir()
+    if project_rules_content:
+        (arche_dir / PROJECT_RULES).write_text(project_rules_content)
+
+
 @app.command()
 def start(
-    goal: str = typer.Argument(..., help="Goal for Arche to achieve"),
+    goal: list[str] = typer.Argument(..., help="Goal for Arche to achieve"),
     engine: str = typer.Option("claude_sdk", "-e", "--engine", help="Engine: claude_sdk, deepagents, codex"),
     model: str = typer.Option(None, "-m", "--model", help="Model to use"),
     plan: bool = typer.Option(False, "-p", "--plan", help="Start with plan mode first"),
@@ -368,22 +378,38 @@ def start(
     force: bool = typer.Option(False, "-f", "--force", help="Restart if running"),
 ):
     """Start Arche with specified engine."""
+    goal_str = " ".join(goal)
     arche_dir = Path.cwd() / ".arche"
 
     if arche_dir.exists():
         running, pid = is_running(arche_dir)
-        if running and not force:
-            typer.echo(f"Already running (PID {pid}). Use -f to restart.", err=True)
-            return tail_log(arche_dir)
         if running:
-            typer.echo(f"Stopping PID {pid}...")
-            kill_arche(pid)
-            time.sleep(1)
+            if force:
+                typer.echo(f"Stopping PID {pid}...")
+                kill_arche(pid)
+                time.sleep(1)
+            elif typer.confirm(f"Arche is running (PID {pid}). Stop and restart?"):
+                typer.echo(f"Stopping PID {pid}...")
+                kill_arche(pid)
+                time.sleep(1)
+            else:
+                typer.echo("Attaching to running process...")
+                return tail_log(arche_dir)
+        else:
+            # Not running but has previous session
+            state = read_state(arche_dir)
+            if state.get("turn", 1) > 1:
+                # Has completed work
+                if typer.confirm("Previous session exists. Reset? (PROJECT_RULES.md will be kept)"):
+                    reset_arche_dir(arche_dir)
 
     arche_dir.mkdir(exist_ok=True)
     (arche_dir / "journal").mkdir(exist_ok=True)
     (arche_dir / "plan").mkdir(exist_ok=True)
+    (arche_dir / "feedback").mkdir(exist_ok=True)
+    (arche_dir / "feedback" / "archive").mkdir(exist_ok=True)
     (arche_dir / "retrospective").mkdir(exist_ok=True)
+    (arche_dir / "tools").mkdir(exist_ok=True)
 
     # Only copy PROJECT_RULES (project-specific state). RULE_* files are read from PKG_DIR with .arche/ override.
     if not (arche_dir / PROJECT_RULES).exists():
@@ -400,11 +426,11 @@ def start(
 
     (arche_dir / INFINITE).touch() if infinite else (arche_dir / INFINITE).unlink(missing_ok=True)
     (arche_dir / BATCH_MODE).touch() if batch else (arche_dir / BATCH_MODE).unlink(missing_ok=True)
-    (arche_dir / LOG).write_text(f"Started: {datetime.now().isoformat()}\nGoal: {goal}\nEngine: {engine}\n")
+    (arche_dir / LOG).write_text(f"Started: {datetime.now().isoformat()}\nGoal: {goal_str}\nEngine: {engine}\n")
 
-    typer.echo(f"Goal: {goal}")
+    typer.echo(f"Goal: {goal_str}")
     typer.echo(f"Engine: {engine}")
-    start_daemon(arche_dir, goal)
+    start_daemon(arche_dir, goal_str)
     time.sleep(0.5)
     tail_log(arche_dir)
 
@@ -490,19 +516,20 @@ def status():
 
 @app.command()
 def feedback(
-    message: str = typer.Argument(..., help="Feedback message"),
+    message: list[str] = typer.Argument(..., help="Feedback message"),
     priority: str = typer.Option("medium", "-p", help="high/medium/low"),
     now: bool = typer.Option(False, "-n", "--now", help="Interrupt and review now"),
 ):
     """Add feedback."""
     arche_dir = get_arche_dir()
-    pending = arche_dir / "feedback" / "pending"
-    pending.mkdir(parents=True, exist_ok=True)
+    feedback_dir = arche_dir / "feedback"
+    feedback_dir.mkdir(parents=True, exist_ok=True)
 
+    msg = " ".join(message)
     ts = datetime.now()
-    slug = re.sub(r'[^a-z0-9-]', '-', message[:30].lower())
-    (pending / f"{ts:%Y%m%d-%H%M}-{slug}.yaml").write_text(
-        f'meta:\n  timestamp: "{ts.isoformat()}"\nsummary: "{message}"\npriority: "{priority}"\nstatus: "pending"\n'
+    slug = re.sub(r'[^a-z0-9-]', '-', msg[:30].lower())
+    (feedback_dir / f"{ts:%Y%m%d-%H%M}-{slug}.yaml").write_text(
+        f'meta:\n  timestamp: "{ts.isoformat()}"\nsummary: "{msg}"\npriority: "{priority}"\n'
     )
     typer.echo("Feedback added.")
 
@@ -551,6 +578,24 @@ def daemon_cmd(arche_dir: str, goal_b64: str):
     import base64
     goal = base64.b64decode(goal_b64).decode() or None
     daemon_main(Path(arche_dir), goal)
+
+
+@app.command(name="serve")
+def serve_cmd(
+    host: str = typer.Option("0.0.0.0", "-h", "--host", help="Bind host"),
+    port: int = typer.Option(8420, "-p", "--port", help="Bind port"),
+    password: str = typer.Option(None, "-P", "--password", help="Auth password"),
+    reload: bool = typer.Option(False, "-r", "--reload", help="Enable auto-reload"),
+):
+    """Start Arche daemon with web UI."""
+    from arche.server.daemon import run_daemon
+    run_daemon(
+        project_path=Path.cwd(),
+        host=host,
+        port=port,
+        password=password,
+        reload=reload,
+    )
 
 
 if __name__ == "__main__":
