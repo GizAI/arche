@@ -95,8 +95,6 @@ When ALL work is verified complete:
 ### {{ "Plan Journal" if plan_mode else "Review Journal" }}
 
 ```yaml
-meta:
-  timestamp: "ISO datetime"
 turn: {{ "1" if plan_mode else "2" }}
 task: "{{ "Initial planning" if plan_mode else "Review of turn 1" }}"
 {%- if plan_mode %}
@@ -111,8 +109,6 @@ status: "pass" | "needs_rework"
 ### Plan
 
 ```yaml
-meta:
-  timestamp: "ISO datetime"
 goal: "Main goal"
 items:
   - id: "task-1"
@@ -123,8 +119,6 @@ items:
 ### Feedback
 
 ```yaml
-meta:
-  timestamp: "ISO datetime"
 summary: "Feedback content"
 priority: "high" | "medium" | "low"
 ```

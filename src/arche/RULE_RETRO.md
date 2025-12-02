@@ -28,7 +28,6 @@ Add discovered rules (very concise, no duplication):
 ```yaml
 # Retrospective Schema
 meta:
-  timestamp: "ISO datetime"
   turns_reviewed: [1, 2, 3, ...]
 insights:
   what_worked: ["..."]

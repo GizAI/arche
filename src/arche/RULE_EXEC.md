@@ -15,8 +15,6 @@ Write journal to `.arche/journal/YYYYMMDD-HHMM-short-title.yaml`. The reviewer w
 ## Journal Schema
 
 ```yaml
-meta:
-  timestamp: "ISO datetime"
 turn: 1
 task: "What was done"
 files: ["list", "of", "changed", "files"]

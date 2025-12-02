@@ -35,6 +35,7 @@ arche stop               # Stop running agent
 arche resume             # Resume from last turn
 arche resume -r          # Resume with review mode
 arche resume -R          # Resume with retrospective mode
+arche resume Fix the bug  # Resume with feedback
 arche log                # View real-time logs (Ctrl+C to detach)
 arche log --no-follow    # View static log
 arche status             # Check if running

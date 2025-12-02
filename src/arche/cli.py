@@ -2,10 +2,13 @@
 """Arche - Long-lived coding agent runner."""
 
 import asyncio
+import base64
 import json
 import os
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -17,50 +20,49 @@ from jinja2 import Template
 
 from arche.engines import create_engine, EventType
 
-app = typer.Typer(
-    name="arche",
-    help="Long-lived coding agent with exec/review alternation.",
-    no_args_is_help=True,
-    add_completion=False,
-)
+app = typer.Typer(name="arche", help="Long-lived coding agent.", no_args_is_help=True, add_completion=False)
 
-# File names
-LOG, PID, STATE = "arche.log", "arche.pid", "state.json"
-RULE_EXEC, RULE_REVIEW, RULE_RETRO, RULE_COMMON, PROMPT = "RULE_EXEC.md", "RULE_REVIEW.md", "RULE_RETRO.md", "RULE_COMMON.md", "PROMPT.md"
-PROJECT_RULES = "PROJECT_RULES.md"
+# Constants
+LOG, PID, STATE, PROJECT_RULES = "arche.log", "arche.pid", "state.json", "PROJECT_RULES.md"
+RULE_EXEC, RULE_REVIEW, RULE_RETRO, RULE_COMMON = "RULE_EXEC.md", "RULE_REVIEW.md", "RULE_RETRO.md", "RULE_COMMON.md"
 INFINITE, FORCE_REVIEW, FORCE_RETRO, STEP_MODE = "infinite", "force_review", "force_retro", "step"
 PKG_DIR = Path(__file__).parent
+DIRS = ["journal", "plan", "feedback", "feedback/archive", "retrospective", "tools"]
 
-# Default state
-DEFAULT_STATE = {"engine": {"type": "claude_sdk", "kwargs": {}}, "retro_every": "auto", "turn": 1}
+# Tool arg display keys
+TOOL_ARG_KEYS = {
+    "Read": "file_path", "Write": "file_path", "Edit": "file_path",
+    "Bash": "command", "Grep": "pattern", "Glob": "pattern", "Task": "description",
+}
+
+
+# === Utilities ===
+
+def read_file(path: Path) -> str:
+    return path.read_text() if path.exists() else ""
 
 
 def read_state(arche_dir: Path) -> dict:
-    """Read state from state.json."""
     try:
-        return json.loads((arche_dir / STATE).read_text()) if (arche_dir / STATE).exists() else DEFAULT_STATE.copy()
+        return json.loads((arche_dir / STATE).read_text()) if (arche_dir / STATE).exists() else {}
     except json.JSONDecodeError:
-        return DEFAULT_STATE.copy()
+        return {}
 
 
 def write_state(arche_dir: Path, state: dict):
-    """Write state to state.json."""
     (arche_dir / STATE).write_text(json.dumps(state, indent=2))
 
 
 def find_arche_dir() -> Path | None:
-    """Walk up from cwd to find .arche/ directory."""
     p = Path.cwd().resolve()
-    while True:
+    while p != p.parent:
         if (p / ".arche").is_dir():
             return p / ".arche"
-        if p == p.parent:
-            return None
         p = p.parent
+    return None
 
 
 def get_arche_dir() -> Path:
-    """Get .arche/ directory or exit."""
     if d := find_arche_dir():
         return d
     typer.echo("Error: No .arche/ found. Run 'arche start <goal>'.", err=True)
@@ -68,7 +70,6 @@ def get_arche_dir() -> Path:
 
 
 def is_running(arche_dir: Path) -> tuple[bool, int | None]:
-    """Check if Arche is running."""
     pid_file = arche_dir / PID
     if not pid_file.exists():
         return False, None
@@ -81,186 +82,212 @@ def is_running(arche_dir: Path) -> tuple[bool, int | None]:
         return False, None
 
 
-def kill_arche(pid: int, force: bool = False):
-    """Kill Arche process group."""
+def kill_process(pid: int, force: bool = False):
     try:
         os.killpg(os.getpgid(pid), signal.SIGKILL if force else signal.SIGTERM)
     except ProcessLookupError:
         pass
 
 
-def read_file(path: Path) -> str:
-    return path.read_text() if path.exists() else ""
+def stop_and_wait(arche_dir: Path, pid: int) -> bool:
+    """Stop process and wait. Returns True if stopped gracefully."""
+    typer.echo(f"Stopping PID {pid}...")
+    kill_process(pid)
+    for _ in range(10):
+        time.sleep(0.5)
+        if not is_running(arche_dir)[0]:
+            return True
+    kill_process(pid, force=True)
+    (arche_dir / PID).unlink(missing_ok=True)
+    return False
 
+
+def add_feedback(arche_dir: Path, msg: str, priority: str = "medium"):
+    """Add feedback file."""
+    feedback_dir = arche_dir / "feedback"
+    feedback_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now()
+    slug = re.sub(r'[^a-z0-9-]', '-', msg[:30].lower())
+    (feedback_dir / f"{ts:%Y%m%d-%H%M}-{slug}.yaml").write_text(
+        f'meta:\n  timestamp: "{ts.isoformat()}"\nsummary: "{msg}"\npriority: "{priority}"\n'
+    )
+
+
+def init_arche_dir(arche_dir: Path):
+    """Initialize .arche/ directory structure."""
+    arche_dir.mkdir(exist_ok=True)
+    for d in DIRS:
+        (arche_dir / d).mkdir(exist_ok=True)
+    if not (arche_dir / PROJECT_RULES).exists():
+        (arche_dir / PROJECT_RULES).write_text(read_file(PKG_DIR / PROJECT_RULES))
+
+
+def reset_arche_dir(arche_dir: Path):
+    """Reset .arche/ preserving PROJECT_RULES.md."""
+    rules = read_file(arche_dir / PROJECT_RULES)
+    shutil.rmtree(arche_dir)
+    arche_dir.mkdir()
+    if rules:
+        (arche_dir / PROJECT_RULES).write_text(rules)
+
+
+def start_daemon(arche_dir: Path, goal: str | None = None):
+    goal_b64 = base64.b64encode((goal or "").encode()).decode()
+    subprocess.Popen(
+        [sys.executable, "-m", "arche.cli", "daemon", str(arche_dir), goal_b64],
+        start_new_session=True, stdout=subprocess.DEVNULL,
+        stderr=open(arche_dir / "daemon.err", "a"),
+    )
+
+
+def tail_log(arche_dir: Path):
+    log_file = arche_dir / LOG
+    if not log_file.exists():
+        log_file.write_text("")
+    try:
+        subprocess.run(["tail", "-f", "-n", "100", str(log_file)])
+    except KeyboardInterrupt:
+        if is_running(arche_dir)[0]:
+            typer.echo("\nDetached. Run 'arche stop' to stop.", err=True)
+        else:
+            typer.echo("\nArche has finished.", err=True)
+
+
+# === Prompt Building ===
 
 def list_tools(arche_dir: Path) -> str:
-    """List tools in .arche/tools/."""
     tools_dir = arche_dir / "tools"
     if not tools_dir.exists():
         return ""
-    tools = [f.stem for f in sorted(tools_dir.glob("*.py"))]
-    return ", ".join(tools) if tools else ""
+    return ", ".join(f.stem for f in sorted(tools_dir.glob("*.py")))
 
 
-def read_latest_journal(arche_dir: Path, journal_path: str | None = None) -> str:
-    """Read specific or latest journal."""
-    if journal_path:
-        # Handle both relative and absolute paths
-        full_path = arche_dir / journal_path if not journal_path.startswith("/") else Path(journal_path)
-        if full_path.exists():
-            return full_path.read_text()
-    journals = sorted((arche_dir / "journal").glob("*.yaml"), reverse=True) if (arche_dir / "journal").exists() else []
-    return journals[0].read_text() if journals else ""
+def read_latest_journal(arche_dir: Path, path: str | None = None) -> str:
+    if path:
+        full = arche_dir / path if not path.startswith("/") else Path(path)
+        if full.exists():
+            return full.read_text()
+    journal_dir = arche_dir / "journal"
+    if journal_dir.exists():
+        journals = sorted(journal_dir.glob("*.yaml"), reverse=True)
+        if journals:
+            return journals[0].read_text()
+    return ""
 
 
 def read_goal_from_plan(arche_dir: Path) -> str | None:
-    """Read goal from latest plan file."""
-    plans = sorted((arche_dir / "plan").glob("*.yaml"), reverse=True) if (arche_dir / "plan").exists() else []
-    return yaml.safe_load(plans[0].read_text()).get("goal") if plans else None
+    plan_dir = arche_dir / "plan"
+    if plan_dir.exists():
+        plans = sorted(plan_dir.glob("*.yaml"), reverse=True)
+        if plans:
+            return yaml.safe_load(plans[0].read_text()).get("goal")
+    return None
 
 
-def parse_reviewer_json(output: str) -> dict | None:
-    """Parse JSON from reviewer output."""
+def build_system_prompt(arche_dir: Path, mode: str) -> str:
+    infinite = (arche_dir / INFINITE).exists()
+    step = (arche_dir / STEP_MODE).exists()
+    plan_mode = mode == "plan"
+
+    common = Template(read_file(arche_dir / RULE_COMMON) or read_file(PKG_DIR / RULE_COMMON)).render(
+        tools=list_tools(arche_dir), project_rules=read_file(arche_dir / PROJECT_RULES)
+    )
+    rule_map = {"plan": RULE_REVIEW, "exec": RULE_EXEC, "review": RULE_REVIEW, "retro": RULE_RETRO}
+    rule = read_file(arche_dir / rule_map.get(mode, RULE_EXEC)) or read_file(PKG_DIR / rule_map.get(mode, RULE_EXEC))
+    prompt = Template(rule).render(infinite=infinite, step=step, common=common, plan_mode=plan_mode)
+    return f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{prompt}"
+
+
+def build_user_prompt(turn: int, arche_dir: Path, goal: str | None, mode: str,
+                      next_task: str | None, journal_file: str | None) -> str:
+    if mode == "plan":
+        return f"Turn {turn}. Mode: PLAN.\nGoal: {goal}\n\nCreate a detailed plan. Do NOT execute."
+    if mode == "retro":
+        return f"Turn {turn}. Mode: RETRO.\nGoal: {goal}\n\nConduct retrospective. Update PROJECT_RULES.md."
+    if mode == "review":
+        return f"Turn {turn}. Mode: REVIEW.\nGoal: {goal}\n\n## Previous Journal\n{read_latest_journal(arche_dir)}"
+    return f"Turn {turn}. Mode: EXEC.\nGoal: {goal}\n\n## Task\n{next_task or goal or 'Continue with the plan'}\n\n## Context\n{read_latest_journal(arche_dir, journal_file)}"
+
+
+def parse_response_json(output: str) -> dict | None:
     if m := re.search(r'```json\s*(\{.*?\})\s*```', output, re.DOTALL):
         try:
             return json.loads(m.group(1))
         except json.JSONDecodeError:
             pass
-    for start in [m.start() for m in re.finditer(r'\{\s*"(?:status|next_task)', output)]:
-        depth, end = 0, start
-        for i, c in enumerate(output[start:], start):
-            if c == '{': depth += 1
-            elif c == '}': depth -= 1
+    for m in re.finditer(r'\{\s*"(?:status|next_task)', output):
+        depth, end = 0, m.start()
+        for i, c in enumerate(output[m.start():], m.start()):
+            depth += (c == '{') - (c == '}')
             if depth == 0:
                 end = i + 1
                 break
         try:
-            return json.loads(output[start:end])
+            return json.loads(output[m.start():end])
         except json.JSONDecodeError:
             continue
     return None
 
 
-def build_system_prompt(arche_dir: Path, mode: str) -> str:
-    """Build system prompt from templates. mode: 'plan', 'exec', 'review', 'retro'"""
-    infinite = (arche_dir / INFINITE).exists()
-    step = (arche_dir / STEP_MODE).exists()
-    tools = list_tools(arche_dir)
-    now = datetime.now()
-    plan_mode = (mode == "plan")
-    project_rules = read_file(arche_dir / PROJECT_RULES) or ""
-
-    common = Template(read_file(arche_dir / RULE_COMMON) or read_file(PKG_DIR / RULE_COMMON)).render(
-        tools=tools, project_rules=project_rules
-    )
-    # plan mode uses RULE_REVIEW with plan_mode=True
-    rule_map = {"plan": RULE_REVIEW, "exec": RULE_EXEC, "review": RULE_REVIEW, "retro": RULE_RETRO}
-    rule_name = rule_map.get(mode, RULE_EXEC)
-    rule_content = read_file(arche_dir / rule_name) or read_file(PKG_DIR / rule_name)
-
-    prompt = Template(rule_content).render(infinite=infinite, step=step, common=common, plan_mode=plan_mode)
-    return f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n{prompt}"
-
-
-def build_user_prompt(turn: int, arche_dir: Path, goal: str | None, mode: str,
-                      next_task: str | None, journal_file: str | None, resumed: bool) -> str:
-    """Build user prompt from template. mode: 'plan', 'exec', 'review', 'retro'"""
-    tpl = Template(read_file(PKG_DIR / PROMPT) or "Turn {{ turn }}.")
-    if mode == "plan":
-        return f"Turn {turn}. Mode: PLAN.\nGoal: {goal}\n\nCreate a detailed plan for this goal. Do NOT execute - only plan and save to journal."
-    if mode == "retro":
-        return f"Turn {turn}. Mode: RETRO.\nGoal: {goal}\n\nConduct retrospective. Review all progress, update PROJECT_RULES.md."
-    if mode == "review":
-        return tpl.render(turn=turn, goal=goal, review_mode=True,
-                         prev_journal=read_latest_journal(arche_dir), resumed=resumed)
-    return tpl.render(turn=turn, goal=goal, review_mode=False,
-                     next_task=next_task or goal or "Continue with the plan",
-                     context_journal=read_latest_journal(arche_dir, journal_file) if journal_file else "")
-
-
-def _format_tool_args(tool_name: str, args: dict | None) -> str:
-    """Format tool args for log display."""
+def format_tool_args(name: str, args: dict | None) -> str:
     if not args:
         return ""
-    # Show key argument based on tool type
-    if tool_name == "Read" and "file_path" in args:
-        return args["file_path"]
-    if tool_name == "Write" and "file_path" in args:
-        return args["file_path"]
-    if tool_name == "Edit" and "file_path" in args:
-        return args["file_path"]
-    if tool_name == "Bash" and "command" in args:
-        cmd = args["command"][:60] + "..." if len(args.get("command", "")) > 60 else args.get("command", "")
-        return cmd
-    if tool_name == "Grep" and "pattern" in args:
-        return f'"{args["pattern"]}"'
-    if tool_name == "Glob" and "pattern" in args:
-        return args["pattern"]
-    if tool_name == "Task" and "description" in args:
-        return args["description"]
-    # Default: show first string arg
+    if key := TOOL_ARG_KEYS.get(name):
+        val = args.get(key, "")
+        if name == "Bash":
+            return val[:60] + "..." if len(val) > 60 else val
+        if name == "Grep":
+            return f'"{val}"'
+        return val
     for v in args.values():
         if isinstance(v, str) and v:
             return v[:50] + "..." if len(v) > 50 else v
     return ""
 
 
+# === Main Loop ===
+
 async def run_loop(arche_dir: Path, goal: str | None = None):
-    """Main exec/review/retro loop."""
     project_root = arche_dir.parent
     log_file = arche_dir / LOG
-    infinite = (arche_dir / INFINITE).exists()
-
-    # Load state
     state = read_state(arche_dir)
-    retro_config = state.get("retro_every", "auto")
-    retro_every = int(retro_config) if str(retro_config).isdigit() else 0  # auto or off = 0 (plan-driven)
-    turn = state.get("turn", 1)
-    plan_mode = state.get("plan_mode", False)  # True if started with --plan
-    goal = goal or state.get("goal") or read_goal_from_plan(arche_dir)
-    next_task = state.get("next_task")
-    journal_file = state.get("journal_file")
 
-    # Engine config (engine created per turn with appropriate permission_mode)
+    infinite = (arche_dir / INFINITE).exists()
+    retro_cfg = state.get("retro_every", "auto")
+    retro_every = int(retro_cfg) if str(retro_cfg).isdigit() else 0
+    turn = state.get("turn", 1)
+    plan_mode = state.get("plan_mode", False)
+    goal = goal or state.get("goal") or read_goal_from_plan(arche_dir)
+    next_task, journal_file = state.get("next_task"), state.get("journal_file")
+
     engine_cfg = state.get("engine", {})
     engine_type = engine_cfg.get("type", "claude_sdk")
-    base_engine_kwargs = dict(engine_cfg.get("kwargs", {}))
-    base_engine_kwargs["cwd"] = project_root
+    engine_kwargs = {"cwd": project_root, **engine_cfg.get("kwargs", {})}
+    if engine_type == "claude_sdk":
+        engine_kwargs["permission_mode"] = "bypassPermissions"
 
     while True:
-        # Save current turn
         state["turn"] = turn
         write_state(arche_dir, state)
 
         # Determine mode
-        resumed = False
         if (arche_dir / FORCE_RETRO).exists():
             (arche_dir / FORCE_RETRO).unlink()
             mode = "retro"
         elif (arche_dir / FORCE_REVIEW).exists():
             (arche_dir / FORCE_REVIEW).unlink()
-            mode, resumed = "review", True
+            mode = "review"
         elif retro_every > 0 and turn > 1 and turn % retro_every == 0:
             mode = "retro"
         elif turn == 1 and plan_mode:
-            mode = "plan"  # First turn is plan only if --plan was used
+            mode = "plan"
+        elif plan_mode:
+            mode = "review" if turn % 2 == 1 else "exec"
         else:
-            # plan > exec > review > exec > review (if plan_mode)
-            # exec > review > exec > review (if no plan_mode)
-            if plan_mode:
-                mode = "review" if turn % 2 == 1 else "exec"  # turn 2=exec, 3=review, 4=exec
-            else:
-                mode = "review" if turn % 2 == 0 else "exec"  # turn 1=exec, 2=review, 3=exec
+            mode = "review" if turn % 2 == 0 else "exec"
 
-        # Build prompts
         system_prompt = build_system_prompt(arche_dir, mode)
-        user_prompt = build_user_prompt(turn, arche_dir, goal, mode, next_task, journal_file, resumed)
-
-        # Create engine with bypassPermissions for all modes
-        # Planning behavior is controlled via system prompt (RULE_PLAN.md)
-        engine_kwargs = dict(base_engine_kwargs)
-        if engine_type == "claude_sdk":
-            engine_kwargs["permission_mode"] = "bypassPermissions"
+        user_prompt = build_user_prompt(turn, arche_dir, goal, mode, next_task, journal_file)
         engine = create_engine(engine_type, **engine_kwargs)
 
         try:
@@ -268,9 +295,7 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
                 f.write(f"\n{'='*50}\nTurn {turn} ({mode.upper()}) - {datetime.now().isoformat()}\n{'='*50}\n")
                 f.flush()
 
-                output = ""
-                last_tool_ids = set()  # Track emitted tool IDs to avoid duplicates
-                last_was_tool = False  # Track if last output was a tool call
+                output, seen_tools, last_was_tool = "", set(), False
                 async for event in engine.run(goal=user_prompt, system_prompt=system_prompt):
                     if event.type == EventType.CONTENT and event.content:
                         output += event.content
@@ -278,16 +303,13 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
                         f.flush()
                         last_was_tool = False
                     elif event.type == EventType.TOOL_CALL:
-                        # Skip duplicate tool calls (streaming + AssistantMessage)
                         tool_id = event.metadata.get("tool_id") if event.metadata else None
-                        if tool_id and tool_id in last_tool_ids:
+                        if tool_id and tool_id in seen_tools:
                             continue
                         if tool_id:
-                            last_tool_ids.add(tool_id)
-                        args_str = _format_tool_args(event.tool_name, event.tool_args)
-                        # Add newline only if previous was text (not tool)
+                            seen_tools.add(tool_id)
                         prefix = "\n" if not last_was_tool else ""
-                        f.write(f"{prefix}[TOOL] {event.tool_name} {args_str}\n")
+                        f.write(f"{prefix}[TOOL] {event.tool_name} {format_tool_args(event.tool_name, event.tool_args)}\n")
                         f.flush()
                         last_was_tool = True
                     elif event.type == EventType.ERROR:
@@ -296,23 +318,19 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
                         last_was_tool = False
 
                 if mode in ("review", "retro", "plan"):
-                    if resp := parse_reviewer_json(output):
+                    if resp := parse_response_json(output):
                         f.write(f"\n*** {mode.upper()}: {resp} ***\n")
                         if not infinite and resp.get("status") == "done":
                             f.write("\n*** Done ***\n")
                             break
                         next_task, journal_file = resp.get("next_task"), resp.get("journal_file")
-                        # Save to state for resume
-                        state["next_task"] = next_task
-                        state["journal_file"] = journal_file
+                        state.update(next_task=next_task, journal_file=journal_file)
                         write_state(arche_dir, state)
                     else:
                         f.write(f"\n*** Warning: No {mode} JSON ***\n")
                         next_task, journal_file = None, None
                 else:
-                    # exec 완료 후 next_task 초기화
-                    state["next_task"] = None
-                    state["journal_file"] = None
+                    state.update(next_task=None, journal_file=None)
                     write_state(arche_dir, state)
 
                 turn += 1
@@ -325,122 +343,55 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
 
 
 def daemon_main(arche_dir: Path, goal: str | None):
-    """Daemon entry point."""
-    pid_file = arche_dir / PID
-    pid_file.write_text(str(os.getpid()))
+    (arche_dir / PID).write_text(str(os.getpid()))
     try:
         asyncio.run(run_loop(arche_dir, goal))
     finally:
-        pid_file.unlink(missing_ok=True)
+        (arche_dir / PID).unlink(missing_ok=True)
 
 
-def start_daemon(arche_dir: Path, goal: str | None = None):
-    """Start daemon process."""
-    import subprocess
-    import base64
-
-    goal_b64 = base64.b64encode((goal or "").encode()).decode()
-    err_log = arche_dir / "daemon.err"  # Separate file for subprocess errors
-
-    subprocess.Popen(
-        [sys.executable, "-m", "arche.cli", "daemon", str(arche_dir), goal_b64],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=open(err_log, "a"),
-    )
-
-
-def tail_log(arche_dir: Path):
-    """Tail log file."""
-    import subprocess
-    log_file = arche_dir / LOG
-    if not log_file.exists():
-        log_file.write_text("")
-    try:
-        subprocess.run(["tail", "-f", "-n", "100", str(log_file)])
-    except KeyboardInterrupt:
-        running, _ = is_running(arche_dir)
-        if running:
-            typer.echo("\nDetached. Arche continues in background. Run 'arche stop' to stop.", err=True)
-        else:
-            typer.echo("\nArche has finished.", err=True)
-
-
-def reset_arche_dir(arche_dir: Path):
-    """Reset .arche/ directory, preserving PROJECT_RULES.md."""
-    import shutil
-    project_rules_content = read_file(arche_dir / PROJECT_RULES)
-    shutil.rmtree(arche_dir)
-    arche_dir.mkdir()
-    if project_rules_content:
-        (arche_dir / PROJECT_RULES).write_text(project_rules_content)
-
+# === CLI Commands ===
 
 @app.command()
 def start(
-    goal: list[str] = typer.Argument(..., help="Goal for Arche to achieve"),
-    engine: str = typer.Option("claude_sdk", "-e", "--engine", help="Engine: claude_sdk, deepagents, codex"),
+    goal: list[str] = typer.Argument(..., help="Goal to achieve"),
+    engine: str = typer.Option("claude_sdk", "-e", "--engine", help="Engine type"),
     model: str = typer.Option(None, "-m", "--model", help="Model to use"),
-    plan: bool = typer.Option(False, "-p", "--plan", help="Start with plan mode first"),
+    plan: bool = typer.Option(False, "-p", "--plan", help="Start with plan mode"),
     infinite: bool = typer.Option(False, "-i", "--infinite", help="Run infinitely"),
-    step: bool = typer.Option(False, "-s", "--step", help="Process one task at a time"),
-    retro_every: str = typer.Option("auto", "-r", "--retro-every", help="Retro schedule: auto, N (every N turns), off"),
-    force: bool = typer.Option(False, "-f", "--force", help="Restart if running"),
+    step: bool = typer.Option(False, "-s", "--step", help="One task at a time"),
+    retro_every: str = typer.Option("auto", "-r", "--retro-every", help="Retro schedule"),
+    force: bool = typer.Option(False, "-f", "--force", help="Force restart"),
 ):
-    """Start Arche with specified engine."""
+    """Start Arche with a goal."""
     goal_str = " ".join(goal)
     arche_dir = Path.cwd() / ".arche"
 
     if arche_dir.exists():
         running, pid = is_running(arche_dir)
         if running:
-            if force:
-                typer.echo(f"Stopping PID {pid}...")
-                kill_arche(pid)
-                time.sleep(1)
-            elif typer.confirm(f"Arche is running (PID {pid}). Stop and restart?"):
-                typer.echo(f"Stopping PID {pid}...")
-                kill_arche(pid)
-                time.sleep(1)
-            else:
-                typer.echo("Attaching to running process...")
+            if not force and not typer.confirm(f"Running (PID {pid}). Restart?"):
+                typer.echo("Attaching...")
                 return tail_log(arche_dir)
-        else:
-            # Not running but has previous session
-            state = read_state(arche_dir)
-            if state.get("turn", 1) > 1:
-                # Has completed work
-                if typer.confirm("Previous session exists. Reset? (PROJECT_RULES.md will be kept)"):
-                    reset_arche_dir(arche_dir)
+            stop_and_wait(arche_dir, pid)
+        elif read_state(arche_dir).get("turn", 1) > 1:
+            if typer.confirm("Previous session exists. Reset?"):
+                reset_arche_dir(arche_dir)
 
-    arche_dir.mkdir(exist_ok=True)
-    (arche_dir / "journal").mkdir(exist_ok=True)
-    (arche_dir / "plan").mkdir(exist_ok=True)
-    (arche_dir / "feedback").mkdir(exist_ok=True)
-    (arche_dir / "feedback" / "archive").mkdir(exist_ok=True)
-    (arche_dir / "retrospective").mkdir(exist_ok=True)
-    (arche_dir / "tools").mkdir(exist_ok=True)
-
-    # Only copy PROJECT_RULES (project-specific state). RULE_* files are read from PKG_DIR with .arche/ override.
-    if not (arche_dir / PROJECT_RULES).exists():
-        (arche_dir / PROJECT_RULES).write_text(read_file(PKG_DIR / PROJECT_RULES))
-
-    # Write state
-    engine_kwargs = {"model": model} if model else {}
+    init_arche_dir(arche_dir)
     write_state(arche_dir, {
         "goal": goal_str,
-        "engine": {"type": engine, "kwargs": engine_kwargs},
+        "engine": {"type": engine, "kwargs": {"model": model} if model else {}},
         "retro_every": retro_every,
         "turn": 1,
-        "plan_mode": plan,  # True if --plan flag was used
+        "plan_mode": plan,
     })
 
     (arche_dir / INFINITE).touch() if infinite else (arche_dir / INFINITE).unlink(missing_ok=True)
     (arche_dir / STEP_MODE).touch() if step else (arche_dir / STEP_MODE).unlink(missing_ok=True)
     (arche_dir / LOG).write_text(f"Started: {datetime.now().isoformat()}\nGoal: {goal_str}\nEngine: {engine}\n")
 
-    typer.echo(f"Goal: {goal_str}")
-    typer.echo(f"Engine: {engine}")
+    typer.echo(f"Goal: {goal_str}\nEngine: {engine}")
     start_daemon(arche_dir, goal_str)
     time.sleep(0.5)
     tail_log(arche_dir)
@@ -454,51 +405,43 @@ def stop():
     if not running:
         typer.echo("Not running.", err=True)
         raise typer.Exit(1)
-
-    typer.echo(f"Stopping PID {pid}...")
-    kill_arche(pid)
-    for _ in range(10):
-        time.sleep(0.5)
-        if not is_running(arche_dir)[0]:
-            typer.echo("Stopped.")
-            return
-    kill_arche(pid, force=True)
-    (arche_dir / PID).unlink(missing_ok=True)
-    typer.echo("Killed.")
+    typer.echo("Stopped." if stop_and_wait(arche_dir, pid) else "Killed.")
 
 
 @app.command()
 def resume(
+    feedback_msg: list[str] = typer.Argument(None, help="Optional feedback"),
     review: bool = typer.Option(False, "-r", "--review", help="Force review mode"),
-    retro: bool = typer.Option(False, "-R", "--retro", help="Force retrospective mode"),
+    retro: bool = typer.Option(False, "-R", "--retro", help="Force retro mode"),
+    priority: str = typer.Option("medium", "-p", help="Feedback priority"),
 ):
-    """Resume Arche from where it stopped.
-
-    Without flags: continues from last turn.
-    With --review: forces review mode.
-    With --retro: forces retrospective mode.
-    """
+    """Resume Arche from where it stopped."""
     arche_dir = get_arche_dir()
     running, pid = is_running(arche_dir)
     if running:
         typer.echo(f"Already running (PID {pid}).")
         return tail_log(arche_dir)
 
-    state = read_state(arche_dir)
-    turn = state.get("turn", 1)
+    turn = read_state(arche_dir).get("turn", 1)
 
-    # Set force mode flag if specified
+    if feedback_msg:
+        msg = " ".join(feedback_msg)
+        add_feedback(arche_dir, msg, priority)
+        typer.echo(f"Feedback: {msg[:50]}...")
+        review = True  # Auto-enable review mode when feedback provided
+
     mode_str = ""
-    if review:
-        (arche_dir / FORCE_REVIEW).touch()
-        mode_str = " (review mode)"
-    elif retro:
+    if retro:
         (arche_dir / FORCE_RETRO).touch()
-        mode_str = " (retro mode)"
+        mode_str = " (retro)"
+    elif review:
+        (arche_dir / FORCE_REVIEW).touch()
+        mode_str = " (review)"
+
     with open(arche_dir / LOG, "a") as f:
         f.write(f"\n{'='*50}\nResumed: {datetime.now().isoformat()} (turn {turn}){mode_str}\n{'='*50}\n")
 
-    typer.echo(f"Resuming from turn {turn}{mode_str}...")
+    typer.echo(f"Resuming turn {turn}{mode_str}...")
     start_daemon(arche_dir)
     time.sleep(0.5)
     tail_log(arche_dir)
@@ -530,45 +473,31 @@ def status():
     """Show status."""
     if not (arche_dir := find_arche_dir()):
         return typer.echo("No .arche/ found.")
-
     running, pid = is_running(arche_dir)
     state = read_state(arche_dir)
-    mode = ("infinite" if (arche_dir / INFINITE).exists() else "task") + (" step" if (arche_dir / STEP_MODE).exists() else "")
-
-    typer.echo(f"Dir: {arche_dir}")
-    typer.echo(f"Status: {'Running (PID ' + str(pid) + ')' if running else 'Stopped'}")
-    typer.echo(f"Engine: {state.get('engine', {}).get('type', 'claude_sdk')}")
-    typer.echo(f"Turn: {state.get('turn', 1)}")
-    typer.echo(f"Mode: {mode}")
+    mode = ("infinite" if (arche_dir / INFINITE).exists() else "task")
+    mode += " step" if (arche_dir / STEP_MODE).exists() else ""
+    typer.echo(f"Dir: {arche_dir}\nStatus: {'Running (PID ' + str(pid) + ')' if running else 'Stopped'}\n"
+               f"Engine: {state.get('engine', {}).get('type', 'claude_sdk')}\nTurn: {state.get('turn', 1)}\nMode: {mode}")
 
 
 @app.command()
 def feedback(
     message: list[str] = typer.Argument(..., help="Feedback message"),
-    priority: str = typer.Option("medium", "-p", help="high/medium/low"),
-    now: bool = typer.Option(False, "-n", "--now", help="Interrupt and review now"),
+    priority: str = typer.Option("medium", "-p", help="Priority: high/medium/low"),
+    now: bool = typer.Option(False, "-n", "--now", help="Review now"),
 ):
     """Add feedback."""
     arche_dir = get_arche_dir()
-    feedback_dir = arche_dir / "feedback"
-    feedback_dir.mkdir(parents=True, exist_ok=True)
-
     msg = " ".join(message)
-    ts = datetime.now()
-    slug = re.sub(r'[^a-z0-9-]', '-', msg[:30].lower())
-    (feedback_dir / f"{ts:%Y%m%d-%H%M}-{slug}.yaml").write_text(
-        f'meta:\n  timestamp: "{ts.isoformat()}"\nsummary: "{msg}"\npriority: "{priority}"\n'
-    )
+    add_feedback(arche_dir, msg, priority)
     typer.echo("Feedback added.")
 
     if now:
         (arche_dir / FORCE_REVIEW).touch()
         running, pid = is_running(arche_dir)
         if running:
-            typer.echo(f"Interrupting PID {pid}...")
-            kill_arche(pid)
-            time.sleep(1)
-
+            stop_and_wait(arche_dir, pid)
         typer.echo("Starting review...")
         start_daemon(arche_dir)
         time.sleep(0.5)
@@ -584,10 +513,8 @@ def version():
 
 @app.command(name="daemon", hidden=True)
 def daemon_cmd(arche_dir: str, goal_b64: str):
-    """Internal: daemon entry point."""
-    import base64
-    goal = base64.b64decode(goal_b64).decode() or None
-    daemon_main(Path(arche_dir), goal)
+    """Internal daemon entry."""
+    daemon_main(Path(arche_dir), base64.b64decode(goal_b64).decode() or None)
 
 
 @app.command(name="serve")
@@ -595,17 +522,11 @@ def serve_cmd(
     host: str = typer.Option("0.0.0.0", "-h", "--host", help="Bind host"),
     port: int = typer.Option(8420, "-p", "--port", help="Bind port"),
     password: str = typer.Option(None, "-P", "--password", help="Auth password"),
-    reload: bool = typer.Option(False, "-r", "--reload", help="Enable auto-reload"),
+    reload: bool = typer.Option(False, "-r", "--reload", help="Auto-reload"),
 ):
-    """Start Arche daemon with web UI."""
+    """Start web UI server."""
     from arche.server.daemon import run_daemon
-    run_daemon(
-        project_path=Path.cwd(),
-        host=host,
-        port=port,
-        password=password,
-        reload=reload,
-    )
+    run_daemon(project_path=Path.cwd(), host=host, port=port, password=password, reload=reload)
 
 
 if __name__ == "__main__":
