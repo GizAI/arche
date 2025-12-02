@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "arche-agent"
+version = "0.1.0"
+description = "Long-lived coding agent for Claude Code"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.9.0",
+    "jinja2>=3.0",
+]
+
+[project.scripts]
+arche = "arche.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/arche"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/arche/RULE.md" = "arche/RULE.md"
+"src/arche/PROMPT.md" = "arche/PROMPT.md"
