@@ -22,7 +22,8 @@ app = typer.Typer(
 
 LOG_FILE = "arche.log"
 PID_FILE = "arche.pid"
-RULE_FILE = "RULE.md"
+RULE_EXEC_FILE = "RULE_EXEC.md"
+RULE_REVIEW_FILE = "RULE_REVIEW.md"
 PROMPT_FILE = "PROMPT.md"
 INFINITE_FLAG = "infinite"
 CLAUDE_ARGS_FILE = "claude_args.json"
@@ -31,9 +32,9 @@ CLAUDE_ARGS_FILE = "claude_args.json"
 PKG_DIR = Path(__file__).parent
 
 
-def get_rule_content() -> str:
-    """Read RULE.md from package."""
-    rule_file = PKG_DIR / RULE_FILE
+def get_rule_content(review_mode: bool = False) -> str:
+    """Read RULE_EXEC.md or RULE_REVIEW.md from package."""
+    rule_file = PKG_DIR / (RULE_REVIEW_FILE if review_mode else RULE_EXEC_FILE)
     if rule_file.exists():
         return rule_file.read_text()
     return ""
@@ -45,6 +46,50 @@ def get_prompt_template() -> str:
     if prompt_file.exists():
         return prompt_file.read_text()
     return "Turn {{ turn }}. Goal: {{ goal }}."
+
+
+def read_journal_file(arche_dir: Path, journal_path: str | None = None) -> str:
+    """Read a specific journal file or the latest one."""
+    journal_dir = arche_dir / "journal"
+    if not journal_dir.exists():
+        return ""
+
+    if journal_path:
+        # Read specific file from reviewer's instruction
+        full_path = arche_dir / journal_path
+        if full_path.exists():
+            return full_path.read_text()
+        return ""
+
+    # Fall back to latest journal
+    journals = sorted(journal_dir.glob("*.yaml"), reverse=True)
+    if journals:
+        return journals[0].read_text()
+    return ""
+
+
+def parse_reviewer_response(output: str) -> dict | None:
+    """Parse JSON response from reviewer output."""
+    import json
+    import re
+
+    # Look for JSON block in output
+    match = re.search(r'```json\s*(\{.*?\})\s*```', output, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Try to find raw JSON object
+    match = re.search(r'\{\s*"status".*?\}', output, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 def find_arche_dir() -> Path | None:
@@ -140,18 +185,25 @@ def build_claude_cmd(
     arche_dir: Path,
     goal: str | None = None,
     extra_args: list[str] | None = None,
+    next_task: str | None = None,
+    journal_file: str | None = None,
 ) -> list[str]:
     """Build the claude CLI command for a single turn."""
 
-    rule_file = arche_dir / RULE_FILE
     infinite = is_infinite(arche_dir)
+
+    # Odd turns = exec mode, Even turns = review mode
+    review_mode = (turn % 2 == 0)
+
+    # Select appropriate rule file
+    rule_file = arche_dir / (RULE_REVIEW_FILE if review_mode else RULE_EXEC_FILE)
 
     cmd: list[str] = [
         "claude", "--print",
         "--permission-mode", "plan",
     ]
 
-    # Render system prompt from RULE.md template
+    # Render system prompt from RULE_EXEC.md or RULE_REVIEW.md
     if rule_file.exists():
         rule_template = Template(rule_file.read_text())
         rule_prompt = rule_template.render(infinite=infinite)
@@ -161,27 +213,61 @@ def build_claude_cmd(
     if extra_args:
         cmd.extend(extra_args)
 
-    # Render prompt from PROMPT.md template
-    prompt_template = Template(get_prompt_template())
-    prompt = prompt_template.render(turn=turn, goal=goal or "Continue", infinite=infinite)
+    # Get context for prompt
+    if review_mode:
+        # Review mode: read the latest journal (just completed exec)
+        prev_journal = read_journal_file(arche_dir)
+        prompt_template = Template(get_prompt_template())
+        prompt = prompt_template.render(
+            turn=turn,
+            goal=goal,
+            review_mode=True,
+            prev_journal=prev_journal,
+        )
+    else:
+        # Exec mode: use task and journal from reviewer's response
+        context_journal = read_journal_file(arche_dir, journal_file) if journal_file else ""
+        prompt_template = Template(get_prompt_template())
+        prompt = prompt_template.render(
+            turn=turn,
+            goal=goal,
+            review_mode=False,
+            next_task=next_task or goal or "Continue with the plan",
+            context_journal=context_journal,
+        )
+
     cmd.append(prompt)
     return cmd
 
 
 def run_arche_loop(arche_dir: Path, goal: str | None = None, extra_args: list[str] | None = None):
-    """Main Arche loop - runs Claude in turns until ARCHE_DONE."""
+    """Main Arche loop - runs Claude in exec/review alternation."""
     log_file = get_log_file(arche_dir)
     infinite = is_infinite(arche_dir)
     turn = 1
 
+    # State from reviewer's response
+    next_task: str | None = None
+    journal_file: str | None = None
+
     while True:
-        # Pass goal only on first turn
-        cmd = build_claude_cmd(turn, arche_dir, goal if turn == 1 else None, extra_args)
+        review_mode = (turn % 2 == 0)
+
+        # Build command with appropriate context
+        cmd = build_claude_cmd(
+            turn,
+            arche_dir,
+            goal=goal if turn == 1 else None,
+            extra_args=extra_args,
+            next_task=next_task,
+            journal_file=journal_file,
+        )
 
         try:
             with open(log_file, "a", encoding="utf-8") as f:
+                mode_str = "REVIEW" if review_mode else "EXEC"
                 f.write(f"\n{'='*50}\n")
-                f.write(f"Turn {turn} - {datetime.now().isoformat()}\n")
+                f.write(f"Turn {turn} ({mode_str}) - {datetime.now().isoformat()}\n")
                 f.write(f"{'='*50}\n")
                 f.flush()
 
@@ -204,11 +290,24 @@ def run_arche_loop(arche_dir: Path, goal: str | None = None, extra_args: list[st
 
                 proc.wait()
 
-                if "ARCHE_DONE" in full_output and not infinite:
-                    f.write(f"\n\n*** ARCHE_DONE - Stopping ***\n")
-                    break
-                elif "ARCHE_DONE" in full_output and infinite:
-                    f.write(f"\n\n*** ARCHE_DONE - Infinite mode, continuing... ***\n")
+                # After review turn, parse response for next instructions
+                if review_mode:
+                    response = parse_reviewer_response(full_output)
+                    if response:
+                        f.write(f"\n\n*** Reviewer response: {response} ***\n")
+
+                        # Task mode: check for done status
+                        if not infinite and response.get("status") == "done":
+                            f.write(f"\n\n*** All work complete - Stopping ***\n")
+                            break
+
+                        # Set context for next exec turn
+                        next_task = response.get("next_task")
+                        journal_file = response.get("journal_file")
+                    else:
+                        f.write(f"\n\n*** Warning: Could not parse reviewer response ***\n")
+                        next_task = None
+                        journal_file = None
 
                 if proc.returncode != 0:
                     f.write(f"\n\n*** Turn {turn} failed (code {proc.returncode}) ***\n")
@@ -272,10 +371,11 @@ def start(
     # Create directory structure
     arche_dir.mkdir(exist_ok=True)
 
-    # Copy RULE.md from package
-    rule_dest = arche_dir / RULE_FILE
-    if not rule_dest.exists() or force:
-        rule_dest.write_text(get_rule_content())
+    # Copy RULE files from package
+    for rule_file, review_mode in [(RULE_EXEC_FILE, False), (RULE_REVIEW_FILE, True)]:
+        rule_dest = arche_dir / rule_file
+        if not rule_dest.exists() or force:
+            rule_dest.write_text(get_rule_content(review_mode))
 
     # Set infinite mode flag
     set_infinite(arche_dir, infinite)
