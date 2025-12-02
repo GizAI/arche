@@ -12,8 +12,28 @@ Review the previous execution. Test thoroughly. Update plan with issues found.
 
 1. Analyze the goal thoroughly - understand requirements.
 2. Explore codebase - identify relevant files, patterns, dependencies.
-3. Create detailed plan in `.arche/plan/`.
-4. Break down into concrete, actionable tasks.
+3. **Define project standards** in `.arche/templates/RULE_PROJECT.md` (see below).
+4. Create detailed plan in `.arche/plan/`.
+5. Break down into concrete, actionable tasks.
+
+## Define Standards (RULE_PROJECT.md)
+
+Analyze existing codebase first. Document discovered patterns or define new:
+
+**UI** (if applicable):
+- Colors: primary, secondary, accent, semantic (success/error/warning), neutrals
+- Typography: font family, size scale, weight usage
+- Spacing: base unit & scale (e.g., 4px system)
+- Components: buttons, inputs, cards, modals
+- Layout: grid, breakpoints, max-widths
+
+**Code**:
+- Naming: files, vars, functions, classes (e.g., camelCase/snake_case)
+- Structure: folders, module boundaries
+- Patterns: state management, error handling, API design
+- Deps: preferred libraries, version constraints
+
+**Rules**: Existing → follow. None → define minimal. Update in retro.
 
 {%- else %}
 ## Review Process
