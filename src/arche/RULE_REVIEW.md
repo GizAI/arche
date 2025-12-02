@@ -79,6 +79,11 @@ After {{ "planning" if plan_mode else "review" }}, output JSON to control the ne
 {%- endif %}
 {%- if not infinite %}
 
+## Before Done
+- User can actually USE it (not just "works technically")
+- Access info complete (URL + credentials or signup method)
+- No dead-ends in user flow
+
 When ALL work is verified complete:
 ```json
 {

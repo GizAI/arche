@@ -469,7 +469,10 @@ def resume(
         msg = " ".join(feedback_msg)
         add_feedback(arche_dir, msg, priority)
         typer.echo(f"Feedback: {msg[:50]}...")
-        review = True  # Auto-enable review mode when feedback provided
+
+    # Auto-enable review mode if there's pending feedback
+    if read_feedback(arche_dir):
+        review = True
 
     mode_str = ""
     if retro or review:
