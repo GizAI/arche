@@ -20,7 +20,7 @@ Review the previous execution. Test thoroughly. Update plan with issues found.
 
 Analyze existing codebase first. Document discovered patterns or define new:
 
-**UI** (if applicable):
+**UI** (Existing patterns → follow. No patterns → define minimal standards):
 - Colors: primary, secondary, accent, semantic (success/error/warning), neutrals
 - Typography: font family, size scale, weight usage
 - Spacing: base unit & scale (e.g., 4px system)

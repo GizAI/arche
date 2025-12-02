@@ -24,12 +24,13 @@ Use these every time you work. Keep outputs evidence-based, user-ready, and mini
 
 ### Anti-Patterns to avoid
 - Special-case branches for identities/paths/types; hardcoded fallbacks/defaults.
+- Hardcoded colors/fonts/sizes bypassing design tokens.
 - Mixing layers (business logic inside routing/view code).
-- Long-lived TODOs/“temporary” hacks that bypass invariants or tests.
+- Long-lived TODOs/"temporary" hacks that bypass invariants or tests.
 
 ### UX & Acceptance
 - Typography: Uncommon, beautiful fonts; no Inter/Roboto/Arial/system/Space Grotesk.
-- Theme: Strong aesthetic; CSS vars; 2-3 main colors + sharp accents; no purple-on-white gradients.
+- Theme: CSS vars + semantic tokens only (e.g., `--color-error` not `red`); no hardcoded colors/fonts/sizes; themeable.
 - Background: Always layered (gradient + noise/pattern/geometry); avoid flat solids.
 - Motion: CSS/Motion; 1 dramatic page-load stagger + a few key micro interactions.
 - Layout: Mobile first, thumb-zone aware; breakpoints recompose, not just scale.
