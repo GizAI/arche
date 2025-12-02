@@ -2,7 +2,7 @@ Turn {{ turn }}. Mode: {{ mode | upper }}.
 {% if goal %}Goal: {{ goal }}{% endif %}
 {% if feedback %}
 
-## User Feedback (address these first)
+## User Feedback
 {{ feedback }}
 {% endif %}
 {% if mode == "plan" %}
@@ -10,7 +10,7 @@ Turn {{ turn }}. Mode: {{ mode | upper }}.
 Create a detailed plan. Do NOT execute.
 {% elif mode == "retro" %}
 
-Conduct retrospective. Update PROJECT_RULES.md.
+Conduct retrospective. Update RULE_PROJECT.md.
 {% elif mode == "review" %}
 
 ## Previous Journal
@@ -18,7 +18,7 @@ Conduct retrospective. Update PROJECT_RULES.md.
 {% else %}
 
 ## Task
-{{ next_task or goal or "Continue with the plan" }}
+{{ next_task or "See feedback above" }}
 {% if context_journal %}
 
 ## Context

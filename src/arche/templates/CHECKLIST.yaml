@@ -1,0 +1,12 @@
+# Done Checklist - SSOT (Single Source of Truth)
+# All keys must be true in response JSON to approve "done"
+
+goal_met: Original goal achieved
+feedback_done: All user feedback addressed
+usable: User can actually USE it (not just "works technically")
+flow: No dead-ends in user flow
+ui_ux: UI/UX works correctly
+mobile: Mobile-friendly UX
+access: Access info complete (URL + credentials/signup)
+bug_free: No bugs found in testing
+clean: No dead/duplicate code

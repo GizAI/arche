@@ -45,7 +45,7 @@ Guide executor on tool usage in `next_task` field.
    - Mark `done` or add rework for major issues only.
    - Schedule `retro` tasks at appropriate milestones (e.g., after major features).
 {%- endif %}
-3. Update `.arche/PROJECT_RULES.md` if discovered patterns (very concise, no duplication).
+3. Update `.arche/templates/RULE_PROJECT.md` if discovered patterns (very concise, no duplication).
 
 ## Response Format
 
@@ -79,15 +79,18 @@ After {{ "planning" if plan_mode else "review" }}, output JSON to control the ne
 {%- endif %}
 {%- if not infinite %}
 
-## Before Done
-- User can actually USE it (not just "works technically")
-- Access info complete (URL + credentials or signup method)
-- No dead-ends in user flow
+## Before Done Checklist
+| Key | Check |
+|-----|-------|
+{%- for key, desc in checklist.items() %}
+| `{{ key }}` | {{ desc }} |
+{%- endfor %}
 
-When ALL work is verified complete:
+When ALL checks pass:
 ```json
 {
-  "status": "done"
+  "status": "done",
+  "checklist": { {%- for k in checklist %}"{{ k }}":true{{ "," if not loop.last }}{%- endfor %} }
 }
 ```
 {%- endif %}

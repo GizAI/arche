@@ -12,7 +12,7 @@ Use these every time you work. Keep outputs evidence-based, user-ready, and mini
 - Survey first: inspect existing patterns and configs before adding/changing anything.
 - E2E reality: done = real flow works in a running environment via Playwright MCP (auth/session, data write/read, UX usable).
 - Evidence: run relevant checks/tests and cite outputs; reopen artifacts before declaring done.
-- Simplify & clean: remove dead paths, avoid duplication, keep files small/cohesive.
+- Simplify & clean: check impact, update all affected paths, remove dead or backward compat code, avoid duplication, keep files small/cohesive.
 
 ### Code Principles
 - Modularity & layering: single responsibility per module; thin entrypoints; business logic in services, not handlers.
@@ -28,14 +28,19 @@ Use these every time you work. Keep outputs evidence-based, user-ready, and mini
 - Long-lived TODOs/“temporary” hacks that bypass invariants or tests.
 
 ### UX & Acceptance
-- Build coherent user journeys (auth/onboarding/core actions) that feel production-ready, not demo-grade.
-- Acceptance gates: correctness, connectivity, observability (errors/logs visible) before marking done.
-- If tests are green but UX is broken, treat it as a failure—fix the UX.
+- Typography: Uncommon, beautiful fonts; no Inter/Roboto/Arial/system/Space Grotesk.
+- Theme: Strong aesthetic; CSS vars; 2-3 main colors + sharp accents; no purple-on-white gradients.
+- Background: Always layered (gradient + noise/pattern/geometry); avoid flat solids.
+- Motion: CSS/Motion; 1 dramatic page-load stagger + a few key micro interactions.
+- Layout: Mobile first, thumb-zone aware; breakpoints recompose, not just scale.
+- Invisible UX & Journeys: Obvious, low friction auth/onboarding/core flows; clear hierarchy; no decoration without a job.
+- Modes: Dark + light required; shared tokens, tuned contrast per mode.
+- Delight: Each screen has 1 surprising, memorable detail that still feels instantly usable.
+- Quality gates: Only done if correctness, connectivity, and visible errors/logs are in place; green tests with broken UX still count as failure, fix UX.
 
-### Global Rules
+### General
 - Token efficiency: dense text, short titles, no verbose.
 - File naming: `YYYYMMDD-HHMM-short-kebab-title.yaml`
-- All state files are YAML.
 
 ## Layout
 

@@ -4,15 +4,13 @@ Architecture: Imports utilities from arche.cli - no code duplication.
 """
 
 import asyncio
-import os
 import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -20,9 +18,6 @@ from pydantic import BaseModel
 # Import utilities from cli - no duplication
 from arche.cli import (
     LOG,
-    PID,
-    STATE,
-    PROJECT_RULES,
     INFINITE,
     FORCE_REVIEW,
     FORCE_RETRO,
@@ -30,11 +25,13 @@ from arche.cli import (
     read_state,
     write_state,
     is_running,
-    add_feedback,
+    read_feedback,
     init_arche_dir,
     start_daemon,
     stop_and_wait,
+    start_session,
     read_goal_from_plan,
+    add_feedback,
 )
 
 # FastAPI app
@@ -138,7 +135,7 @@ async def get_status(auth: bool = Depends(verify_auth)):
         running=running,
         pid=pid,
         turn=state.get("turn", 1),
-        goal=state.get("goal") or read_goal_from_plan(arche_dir),
+        goal=read_goal_from_plan(arche_dir),
         mode="plan" if state.get("plan_mode") else "exec",
         engine=state.get("engine", {}).get("type", "claude_sdk"),
         last_mode=state.get("last_mode"),
@@ -157,34 +154,9 @@ async def start_agent(req: StartRequest, auth: bool = Depends(verify_auth)):
     if running:
         raise HTTPException(409, f"Agent already running (PID {pid})")
 
-    # Initialize
-    init_arche_dir(arche_dir)
-
-    # Write state
-    write_state(arche_dir, {
-        "goal": req.goal,
-        "engine": {"type": req.engine, "kwargs": {"model": req.model} if req.model else {}},
-        "retro_every": req.retro_every,
-        "turn": 1,
-        "plan_mode": req.plan_mode,
-    })
-
-    # Set mode flags
-    if req.infinite:
-        (arche_dir / INFINITE).touch()
-    else:
-        (arche_dir / INFINITE).unlink(missing_ok=True)
-
-    if req.step:
-        (arche_dir / STEP_MODE).touch()
-    else:
-        (arche_dir / STEP_MODE).unlink(missing_ok=True)
-
-    # Initialize log
-    (arche_dir / LOG).write_text(f"Started: {datetime.now().isoformat()}\nGoal: {req.goal}\nEngine: {req.engine}\n")
-
-    # Start daemon
-    start_daemon(arche_dir, req.goal)
+    # Use shared start_session helper
+    start_session(arche_dir, req.goal, req.engine, req.model,
+                  req.plan_mode, req.infinite, req.step, req.retro_every)
 
     return {"status": "started", "goal": req.goal}
 
@@ -218,17 +190,30 @@ async def resume_agent(
     state = read_state(arche_dir)
     turn = state.get("turn", 1)
 
-    # Handle forced modes
-    if retro:
-        (arche_dir / FORCE_RETRO).touch()
-        turn += 1
-        state["turn"] = turn
-        write_state(arche_dir, state)
-    elif review:
-        (arche_dir / FORCE_REVIEW).touch()
-        turn += 1
-        state["turn"] = turn
-        write_state(arche_dir, state)
+    # Auto-enable review mode if there's pending feedback
+    if read_feedback(arche_dir):
+        review = True
+
+    # Handle forced modes (match CLI logic)
+    if retro or review:
+        last_mode = state.get("last_mode")
+
+        # Calculate natural mode based on previous mode
+        if turn == 1:
+            natural = "plan" if state.get("plan_mode") else "exec"
+        elif last_mode == "exec":
+            natural = "review"
+        else:
+            natural = "exec"
+
+        forced = "retro" if retro else "review"
+
+        # Only set forced mode if it differs from natural mode
+        if forced != natural:
+            turn += 1
+            state["turn"] = turn
+            write_state(arche_dir, state)
+            (arche_dir / FORCE_RETRO if retro else FORCE_REVIEW).touch()
 
     # Remove paused flag if present
     (arche_dir / "paused").unlink(missing_ok=True)

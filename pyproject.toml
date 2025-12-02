@@ -35,9 +35,4 @@ arche = "arche.cli:app"
 packages = ["src/arche"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"src/arche/RULE_EXEC.md" = "arche/RULE_EXEC.md"
-"src/arche/RULE_REVIEW.md" = "arche/RULE_REVIEW.md"
-"src/arche/RULE_RETRO.md" = "arche/RULE_RETRO.md"
-"src/arche/RULE_COMMON.md" = "arche/RULE_COMMON.md"
-"src/arche/PROJECT_RULES.md" = "arche/PROJECT_RULES.md"
-"src/arche/PROMPT.md" = "arche/PROMPT.md"
+"src/arche/templates" = "arche/templates"

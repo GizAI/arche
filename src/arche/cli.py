@@ -2,7 +2,6 @@
 """Arche - Long-lived coding agent runner."""
 
 import asyncio
-import base64
 import json
 import os
 import re
@@ -23,12 +22,12 @@ from arche.engines import create_engine, EventType
 app = typer.Typer(name="arche", help="Long-lived coding agent.", no_args_is_help=True, add_completion=False)
 
 # Constants
-LOG, PID, STATE, PROJECT_RULES = "arche.log", "arche.pid", "state.json", "PROJECT_RULES.md"
-RULE_EXEC, RULE_REVIEW, RULE_RETRO, RULE_COMMON = "RULE_EXEC.md", "RULE_REVIEW.md", "RULE_RETRO.md", "RULE_COMMON.md"
-PROMPT = "PROMPT.md"
+LOG, PID, SERVER_PID, STATE = "arche.log", "arche.pid", "server.pid", "state.json"
+TEMPLATES = ["RULE_EXEC.md", "RULE_REVIEW.md", "RULE_RETRO.md", "RULE_COMMON.md", "RULE_PROJECT.md", "PROMPT.md", "CHECKLIST.yaml"]
 INFINITE, FORCE_REVIEW, FORCE_RETRO, STEP_MODE = "infinite", "force_review", "force_retro", "step"
 PKG_DIR = Path(__file__).parent
-DIRS = ["journal", "plan", "feedback", "feedback/archive", "retrospective", "tools"]
+TPL_DIR = PKG_DIR / "templates"
+DIRS = ["journal", "plan", "feedback", "feedback/archive", "retrospective", "tools", "templates"]
 
 # Tool arg display keys
 TOOL_ARG_KEYS = {
@@ -41,6 +40,13 @@ TOOL_ARG_KEYS = {
 
 def read_file(path: Path) -> str:
     return path.read_text() if path.exists() else ""
+
+
+def get_template(arche_dir: Path | None, name: str) -> str:
+    """Get template content. Checks .arche/templates first, falls back to package."""
+    if arche_dir and (arche_dir / "templates" / name).exists():
+        return (arche_dir / "templates" / name).read_text()
+    return (TPL_DIR / name).read_text()
 
 
 def read_state(arche_dir: Path) -> dict:
@@ -70,8 +76,8 @@ def get_arche_dir() -> Path:
     raise typer.Exit(1)
 
 
-def is_running(arche_dir: Path) -> tuple[bool, int | None]:
-    pid_file = arche_dir / PID
+def check_pid(pid_file: Path) -> tuple[bool, int | None]:
+    """Check if process is running by PID file."""
     if not pid_file.exists():
         return False, None
     try:
@@ -81,6 +87,10 @@ def is_running(arche_dir: Path) -> tuple[bool, int | None]:
     except (ValueError, ProcessLookupError, PermissionError):
         pid_file.unlink(missing_ok=True)
         return False, None
+
+
+def is_running(arche_dir: Path) -> tuple[bool, int | None]:
+    return check_pid(arche_dir / PID)
 
 
 def kill_process(pid: int, force: bool = False):
@@ -119,26 +129,51 @@ def init_arche_dir(arche_dir: Path):
     arche_dir.mkdir(exist_ok=True)
     for d in DIRS:
         (arche_dir / d).mkdir(exist_ok=True)
-    if not (arche_dir / PROJECT_RULES).exists():
-        (arche_dir / PROJECT_RULES).write_text(read_file(PKG_DIR / PROJECT_RULES))
+    # Copy RULE_PROJECT.md by default (can be customized)
+    rules_file = arche_dir / "templates" / "RULE_PROJECT.md"
+    if not rules_file.exists():
+        rules_file.write_text((TPL_DIR / "RULE_PROJECT.md").read_text())
 
 
 def reset_arche_dir(arche_dir: Path):
-    """Reset .arche/ preserving PROJECT_RULES.md."""
-    rules = read_file(arche_dir / PROJECT_RULES)
+    """Reset .arche/ preserving templates/."""
+    templates = {}
+    tpl_dir = arche_dir / "templates"
+    if tpl_dir.exists():
+        for f in tpl_dir.iterdir():
+            if f.is_file():
+                templates[f.name] = f.read_text()
     shutil.rmtree(arche_dir)
-    arche_dir.mkdir()
-    if rules:
-        (arche_dir / PROJECT_RULES).write_text(rules)
+    init_arche_dir(arche_dir)
+    for name, content in templates.items():
+        (arche_dir / "templates" / name).write_text(content)
 
 
-def start_daemon(arche_dir: Path, goal: str | None = None):
-    goal_b64 = base64.b64encode((goal or "").encode()).decode()
+def start_daemon(arche_dir: Path):
     subprocess.Popen(
-        [sys.executable, "-m", "arche.cli", "daemon", str(arche_dir), goal_b64],
+        [sys.executable, "-m", "arche.cli", "daemon", str(arche_dir)],
         start_new_session=True, stdout=subprocess.DEVNULL,
         stderr=open(arche_dir / "daemon.err", "a"),
     )
+
+
+def start_session(arche_dir: Path, goal: str, engine: str, model: str | None,
+                  plan_mode: bool, infinite: bool, step: bool, retro_every: str):
+    """Initialize and start a new agent session."""
+    init_arche_dir(arche_dir)
+    write_state(arche_dir, {
+        "engine": {"type": engine, "kwargs": {"model": model} if model else {}},
+        "retro_every": retro_every,
+        "turn": 1,
+        "plan_mode": plan_mode,
+    })
+    add_feedback(arche_dir, goal, "goal")
+
+    (arche_dir / INFINITE).touch() if infinite else (arche_dir / INFINITE).unlink(missing_ok=True)
+    (arche_dir / STEP_MODE).touch() if step else (arche_dir / STEP_MODE).unlink(missing_ok=True)
+    (arche_dir / LOG).write_text(f"Started: {datetime.now().isoformat()}\nGoal: {goal}\nEngine: {engine}\n")
+
+    start_daemon(arche_dir)
 
 
 def tail_log(arche_dir: Path):
@@ -211,27 +246,33 @@ def archive_feedback(arche_dir: Path):
             f.rename(archive_dir / f.name)
 
 
+def load_checklist(arche_dir: Path | None = None) -> dict:
+    """Load done checklist from YAML."""
+    return yaml.safe_load(get_template(arche_dir, "CHECKLIST.yaml")) or {}
+
+
 def build_system_prompt(arche_dir: Path, mode: str) -> str:
     infinite = (arche_dir / INFINITE).exists()
     step = (arche_dir / STEP_MODE).exists()
     plan_mode = mode == "plan"
+    checklist = load_checklist(arche_dir)
 
-    common = Template(read_file(arche_dir / RULE_COMMON) or read_file(PKG_DIR / RULE_COMMON)).render(
-        tools=list_tools(arche_dir), project_rules=read_file(arche_dir / PROJECT_RULES)
+    common = Template(get_template(arche_dir, "RULE_COMMON.md")).render(
+        tools=list_tools(arche_dir), project_rules=get_template(arche_dir, "RULE_PROJECT.md")
     )
-    rule_file = {"plan": RULE_REVIEW, "exec": RULE_EXEC, "review": RULE_REVIEW, "retro": RULE_RETRO}.get(mode, RULE_EXEC)
-    rule = read_file(arche_dir / rule_file) or read_file(PKG_DIR / rule_file)
-    prompt = Template(rule).render(infinite=infinite, step=step, common=common, plan_mode=plan_mode)
+    rule_map = {"plan": "RULE_REVIEW.md", "exec": "RULE_EXEC.md", "review": "RULE_REVIEW.md", "retro": "RULE_RETRO.md"}
+    rule = get_template(arche_dir, rule_map.get(mode, "RULE_EXEC.md"))
+    prompt = Template(rule).render(infinite=infinite, step=step, common=common, plan_mode=plan_mode, checklist=checklist)
     return f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{prompt}"
 
 
-def build_user_prompt(turn: int, arche_dir: Path, goal: str | None, mode: str,
+def build_user_prompt(turn: int, arche_dir: Path, mode: str,
                       next_task: str | None, journal_file: str | None) -> str:
-    template = Template(read_file(arche_dir / PROMPT) or read_file(PKG_DIR / PROMPT))
+    template = Template(get_template(arche_dir, "PROMPT.md"))
     return template.render(
         turn=turn,
         mode=mode,
-        goal=goal,
+        goal=read_goal_from_plan(arche_dir),  # From plan, not state
         feedback=read_feedback(arche_dir),
         prev_journal=read_latest_journal(arche_dir),
         next_task=next_task,
@@ -277,7 +318,7 @@ def format_tool_args(name: str, args: dict | None) -> str:
 
 # === Main Loop ===
 
-async def run_loop(arche_dir: Path, goal: str | None = None):
+async def run_loop(arche_dir: Path):
     project_root = arche_dir.parent
     log_file = arche_dir / LOG
     state = read_state(arche_dir)
@@ -288,7 +329,6 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
     turn = state.get("turn", 1)
     plan_mode = state.get("plan_mode", False)
     last_mode = state.get("last_mode")  # Track previous mode
-    goal = goal or state.get("goal") or read_goal_from_plan(arche_dir)
     next_task, journal_file = state.get("next_task"), state.get("journal_file")
 
     engine_cfg = state.get("engine", {})
@@ -323,7 +363,7 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
             mode = natural_mode
 
         system_prompt = build_system_prompt(arche_dir, mode)
-        user_prompt = build_user_prompt(turn, arche_dir, goal, mode, next_task, journal_file)
+        user_prompt = build_user_prompt(turn, arche_dir, mode, next_task, journal_file)
         engine = create_engine(engine_type, **engine_kwargs)
 
         try:
@@ -357,13 +397,20 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
                     if resp := parse_response_json(output):
                         f.write(f"\n*** {mode.upper()}: {resp} ***\n")
                         if not infinite and resp.get("status") == "done":
-                            f.write("\n*** Done ***\n")
-                            break
-                        next_task, journal_file = resp.get("next_task"), resp.get("journal_file")
+                            cl = resp.get("checklist", {})
+                            missing = [k for k in load_checklist(arche_dir) if not cl.get(k)]
+                            if not missing:
+                                f.write("\n*** Done ***\n")
+                                archive_feedback(arche_dir)
+                                break
+                            f.write(f"\n*** Done rejected: missing {missing} ***\n")
+                            next_task = f"Complete checklist: {missing}"
+                        else:
+                            next_task = resp.get("next_task")
+                        journal_file = resp.get("journal_file")
                     else:
                         f.write(f"\n*** Warning: No {mode} JSON ***\n")
                         next_task, journal_file = None, None
-                    # Archive feedback after review/retro/plan completes
                     archive_feedback(arche_dir)
                 else:
                     next_task, journal_file = None, None
@@ -382,10 +429,10 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
             await asyncio.sleep(5)
 
 
-def daemon_main(arche_dir: Path, goal: str | None):
+def daemon_main(arche_dir: Path):
     (arche_dir / PID).write_text(str(os.getpid()))
     try:
-        asyncio.run(run_loop(arche_dir, goal))
+        asyncio.run(run_loop(arche_dir))
     finally:
         (arche_dir / PID).unlink(missing_ok=True)
 
@@ -418,21 +465,8 @@ def start(
             if typer.confirm("Previous session exists. Reset?"):
                 reset_arche_dir(arche_dir)
 
-    init_arche_dir(arche_dir)
-    write_state(arche_dir, {
-        "goal": goal_str,
-        "engine": {"type": engine, "kwargs": {"model": model} if model else {}},
-        "retro_every": retro_every,
-        "turn": 1,
-        "plan_mode": plan,
-    })
-
-    (arche_dir / INFINITE).touch() if infinite else (arche_dir / INFINITE).unlink(missing_ok=True)
-    (arche_dir / STEP_MODE).touch() if step else (arche_dir / STEP_MODE).unlink(missing_ok=True)
-    (arche_dir / LOG).write_text(f"Started: {datetime.now().isoformat()}\nGoal: {goal_str}\nEngine: {engine}\n")
-
+    start_session(arche_dir, goal_str, engine, model, plan, infinite, step, retro_every)
     typer.echo(f"Goal: {goal_str}\nEngine: {engine}")
-    start_daemon(arche_dir, goal_str)
     time.sleep(0.5)
     tail_log(arche_dir)
 
@@ -569,22 +603,149 @@ def version():
     typer.echo(f"arche {__version__}")
 
 
+@app.command()
+def templates(
+    list_only: bool = typer.Option(False, "-l", "--list", help="List templates only"),
+):
+    """Copy default templates to .arche/templates/ for customization."""
+    arche_dir = Path.cwd() / ".arche"
+    tpl_dest = arche_dir / "templates"
+    tpl_dest.mkdir(parents=True, exist_ok=True)
+
+    if list_only:
+        typer.echo("Available templates:")
+        for name in TEMPLATES:
+            exists = "✓" if (tpl_dest / name).exists() else " "
+            typer.echo(f"  [{exists}] {name}")
+        return
+
+    copied, skipped = 0, 0
+    for name in TEMPLATES:
+        dest = tpl_dest / name
+        if dest.exists():
+            skipped += 1
+        else:
+            dest.write_text((TPL_DIR / name).read_text())
+            copied += 1
+            typer.echo(f"  + {name}")
+
+    typer.echo(f"Copied {copied}, skipped {skipped} (already exist)")
+
+
 @app.command(name="daemon", hidden=True)
-def daemon_cmd(arche_dir: str, goal_b64: str):
+def daemon_cmd(arche_dir: str):
     """Internal daemon entry."""
-    daemon_main(Path(arche_dir), base64.b64decode(goal_b64).decode() or None)
+    daemon_main(Path(arche_dir))
 
 
-@app.command(name="serve")
-def serve_cmd(
+# === Serve subcommands ===
+serve_app = typer.Typer(name="serve", help="Web UI server commands", no_args_is_help=True)
+app.add_typer(serve_app)
+
+
+def _stop_server(arche_dir: Path) -> bool:
+    """Stop server if running. Returns True if was running."""
+    running, pid = check_pid(arche_dir / SERVER_PID)
+    if not running:
+        return False
+    typer.echo(f"Stopping server (PID {pid})...")
+    kill_process(pid)
+    time.sleep(1)
+    (arche_dir / SERVER_PID).unlink(missing_ok=True)
+    return True
+
+
+def _start_server(arche_dir: Path, host: str, port: int, password: str | None) -> bool:
+    """Start server daemon. Returns True if started successfully."""
+    arche_dir.mkdir(exist_ok=True)
+    subprocess.Popen(
+        [sys.executable, "-m", "arche.cli", "_serve_daemon", str(arche_dir), host, str(port), password or ""],
+        start_new_session=True, stdout=subprocess.DEVNULL,
+        stderr=open(arche_dir / "server.err", "a"),
+    )
+    time.sleep(1)
+    if check_pid(arche_dir / SERVER_PID)[0]:
+        typer.echo(f"Server started at http://{host}:{port}")
+        return True
+    typer.echo("Failed to start. Check: arche serve log", err=True)
+    return False
+
+
+@serve_app.command(name="start")
+def serve_start(
     host: str = typer.Option("0.0.0.0", "-h", "--host", help="Bind host"),
     port: int = typer.Option(8420, "-p", "--port", help="Bind port"),
     password: str = typer.Option(None, "-P", "--password", help="Auth password"),
-    reload: bool = typer.Option(False, "-r", "--reload", help="Auto-reload"),
+    foreground: bool = typer.Option(False, "-f", "--foreground", help="Run in foreground"),
 ):
     """Start web UI server."""
-    from arche.server.daemon import run_daemon
-    run_daemon(project_path=Path.cwd(), host=host, port=port, password=password, reload=reload)
+    arche_dir = Path.cwd() / ".arche"
+    running, pid = check_pid(arche_dir / SERVER_PID)
+    if running:
+        typer.echo(f"Server already running (PID {pid}). Use 'arche serve restart'.")
+        return
+
+    if foreground:
+        from arche.server.daemon import run_daemon
+        run_daemon(project_path=Path.cwd(), host=host, port=port, password=password, reload=True)
+    else:
+        _start_server(arche_dir, host, port, password)
+
+
+@serve_app.command(name="stop")
+def serve_stop():
+    """Stop web UI server."""
+    if _stop_server(Path.cwd() / ".arche"):
+        typer.echo("Stopped.")
+    else:
+        typer.echo("Server not running.", err=True)
+        raise typer.Exit(1)
+
+
+@serve_app.command(name="restart")
+def serve_restart(
+    host: str = typer.Option("0.0.0.0", "-h", "--host", help="Bind host"),
+    port: int = typer.Option(8420, "-p", "--port", help="Bind port"),
+    password: str = typer.Option(None, "-P", "--password", help="Auth password"),
+):
+    """Restart web UI server."""
+    arche_dir = Path.cwd() / ".arche"
+    _stop_server(arche_dir)
+    _start_server(arche_dir, host, port, password)
+
+
+@serve_app.command(name="status")
+def serve_status():
+    """Show server status."""
+    running, pid = check_pid(Path.cwd() / ".arche" / SERVER_PID)
+    typer.echo(f"Running (PID {pid})" if running else "Stopped")
+
+
+@serve_app.command(name="log")
+def serve_log(
+    lines: int = typer.Option(50, "-n", "--lines", help="Lines to show"),
+    error: bool = typer.Option(False, "-e", "--error", help="Show only error log"),
+):
+    """Show server logs."""
+    err_file = Path.cwd() / ".arche" / "server.err"
+    if not err_file.exists() or err_file.stat().st_size == 0:
+        typer.echo("No server logs.")
+        return
+    content = err_file.read_text()
+    output = "\n".join(content.strip().split('\n')[-lines:]) if not error else content[-5000:]
+    typer.echo(output)
+
+
+@app.command(name="_serve_daemon", hidden=True)
+def serve_daemon_cmd(arche_dir: str, host: str, port: str, password: str):
+    """Internal server daemon entry."""
+    arche_path = Path(arche_dir)
+    (arche_path / SERVER_PID).write_text(str(os.getpid()))
+    try:
+        from arche.server.daemon import run_daemon
+        run_daemon(project_path=arche_path.parent, host=host, port=int(port), password=password or None, reload=False)
+    finally:
+        (arche_path / SERVER_PID).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
