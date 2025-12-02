@@ -655,6 +655,13 @@ def _stop_server(arche_dir: Path) -> bool:
     return True
 
 
+def _show_server_log(arche_dir: Path, lines: int = 50):
+    """Show server error log."""
+    err_file = arche_dir / "server.err"
+    if err_file.exists() and err_file.stat().st_size > 0:
+        typer.echo("\n".join(err_file.read_text().strip().split('\n')[-lines:]))
+
+
 def _start_server(arche_dir: Path, host: str, port: int, password: str | None) -> bool:
     """Start server daemon. Returns True if started successfully."""
     arche_dir.mkdir(exist_ok=True)
@@ -667,7 +674,8 @@ def _start_server(arche_dir: Path, host: str, port: int, password: str | None) -
     if check_pid(arche_dir / SERVER_PID)[0]:
         typer.echo(f"Server started at http://{host}:{port}")
         return True
-    typer.echo("Failed to start. Check: arche serve log", err=True)
+    typer.echo("Failed to start:", err=True)
+    _show_server_log(arche_dir, 20)
     return False
 
 
@@ -722,18 +730,13 @@ def serve_status():
 
 
 @serve_app.command(name="log")
-def serve_log(
-    lines: int = typer.Option(50, "-n", "--lines", help="Lines to show"),
-    error: bool = typer.Option(False, "-e", "--error", help="Show only error log"),
-):
+def serve_log(lines: int = typer.Option(50, "-n", "--lines", help="Lines to show")):
     """Show server logs."""
-    err_file = Path.cwd() / ".arche" / "server.err"
-    if not err_file.exists() or err_file.stat().st_size == 0:
+    arche_dir = Path.cwd() / ".arche"
+    if not (arche_dir / "server.err").exists():
         typer.echo("No server logs.")
         return
-    content = err_file.read_text()
-    output = "\n".join(content.strip().split('\n')[-lines:]) if not error else content[-5000:]
-    typer.echo(output)
+    _show_server_log(arche_dir, lines)
 
 
 @app.command(name="_serve_daemon", hidden=True)

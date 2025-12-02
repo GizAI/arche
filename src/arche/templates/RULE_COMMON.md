@@ -30,7 +30,7 @@ Use these every time you work. Keep outputs evidence-based, user-ready, and mini
 
 ### UX & Acceptance
 - Typography: Uncommon, beautiful fonts; no Inter/Roboto/Arial/system/Space Grotesk.
-- Theme: CSS vars + semantic tokens only (e.g., `--color-error` not `red`); no hardcoded colors/fonts/sizes; themeable.
+- Theme: Strong aesthetic; CSS vars + semantic tokens only; no hardcoded colors/fonts/sizes; themeable.
 - Background: Always layered (gradient + noise/pattern/geometry); avoid flat solids.
 - Motion: CSS/Motion; 1 dramatic page-load stagger + a few key micro interactions.
 - Layout: Mobile first, thumb-zone aware; breakpoints recompose, not just scale.
