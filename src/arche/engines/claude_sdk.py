@@ -12,10 +12,10 @@ from claude_agent_sdk import (
     TextBlock,
     ToolUseBlock,
     ToolResultBlock,
-    StreamEvent,
     PermissionResultAllow,
     ToolPermissionContext,
 )
+from claude_agent_sdk.types import StreamEvent
 
 from .base import AgentEngine, AgentEvent, EventType
 
@@ -80,8 +80,9 @@ class ClaudeSDKEngine(AgentEngine):
                     "message": {"role": "user", "content": goal},
                 }
 
-            async with ClaudeSDKClient(options=options) as client:
-                self._client = client
+            client = ClaudeSDKClient(options=options)
+            self._client = client
+            try:
                 await client.connect(prompt_stream())
 
                 async for message in client.receive_response():
@@ -91,7 +92,9 @@ class ClaudeSDKEngine(AgentEngine):
                     for event in self._process_message(message):
                         yield event
 
-            yield AgentEvent(type=EventType.COMPLETE, content="Agent completed")
+                yield AgentEvent(type=EventType.COMPLETE, content="Agent completed")
+            finally:
+                await client.disconnect()
 
         except asyncio.CancelledError:
             yield AgentEvent(type=EventType.STATUS, content="Agent cancelled")
