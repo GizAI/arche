@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Arche - Long-lived coding agent runner for Claude Code."""
 
+import base64
+import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -9,584 +12,347 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 import typer
 from jinja2 import Template
 
 app = typer.Typer(
     name="arche",
-    help="Long-lived coding agent that runs Claude Code.",
+    help="Long-lived coding agent that runs Claude Code in exec/review alternation.",
     no_args_is_help=True,
     add_completion=False,
 )
 
-LOG_FILE = "arche.log"
-PID_FILE = "arche.pid"
-RULE_EXEC_FILE = "RULE_EXEC.md"
-RULE_REVIEW_FILE = "RULE_REVIEW.md"
-PROMPT_FILE = "PROMPT.md"
-INFINITE_FLAG = "infinite"
-CLAUDE_ARGS_FILE = "claude_args.json"
-
-# Package directory (where RULE.md lives)
+# File names
+LOG, PID, RULE_EXEC, RULE_REVIEW, PROMPT = "arche.log", "arche.pid", "RULE_EXEC.md", "RULE_REVIEW.md", "PROMPT.md"
+INFINITE, FORCE_REVIEW, CLAUDE_ARGS, BATCH_MODE = "infinite", "force_review", "claude_args.json", "batch"
 PKG_DIR = Path(__file__).parent
-
-
-def get_rule_content(review_mode: bool = False) -> str:
-    """Read RULE_EXEC.md or RULE_REVIEW.md from package."""
-    rule_file = PKG_DIR / (RULE_REVIEW_FILE if review_mode else RULE_EXEC_FILE)
-    if rule_file.exists():
-        return rule_file.read_text()
-    return ""
-
-
-def get_prompt_template() -> str:
-    """Read PROMPT.md template from package."""
-    prompt_file = PKG_DIR / PROMPT_FILE
-    if prompt_file.exists():
-        return prompt_file.read_text()
-    return "Turn {{ turn }}. Goal: {{ goal }}."
-
-
-def read_journal_file(arche_dir: Path, journal_path: str | None = None) -> str:
-    """Read a specific journal file or the latest one."""
-    journal_dir = arche_dir / "journal"
-    if not journal_dir.exists():
-        return ""
-
-    if journal_path:
-        # Read specific file from reviewer's instruction
-        full_path = arche_dir / journal_path
-        if full_path.exists():
-            return full_path.read_text()
-        return ""
-
-    # Fall back to latest journal
-    journals = sorted(journal_dir.glob("*.yaml"), reverse=True)
-    if journals:
-        return journals[0].read_text()
-    return ""
-
-
-def parse_reviewer_response(output: str) -> dict | None:
-    """Parse JSON response from reviewer output."""
-    import json
-    import re
-
-    # Look for JSON block in output
-    match = re.search(r'```json\s*(\{.*?\})\s*```', output, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
-
-    # Try to find raw JSON object
-    match = re.search(r'\{\s*"status".*?\}', output, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-
-    return None
 
 
 def find_arche_dir() -> Path | None:
     """Walk up from cwd to find .arche/ directory."""
-    current = Path.cwd().resolve()
-    while current != current.parent:
-        arche_dir = current / ".arche"
-        if arche_dir.is_dir():
-            return arche_dir
-        current = current.parent
-    arche_dir = current / ".arche"
-    if arche_dir.is_dir():
-        return arche_dir
-    return None
+    p = Path.cwd().resolve()
+    while True:
+        if (p / ".arche").is_dir():
+            return p / ".arche"
+        if p == p.parent:
+            return None
+        p = p.parent
 
 
 def get_arche_dir() -> Path:
-    """Get .arche/ directory or exit with error."""
-    arche_dir = find_arche_dir()
-    if arche_dir is None:
-        typer.echo("Error: No .arche/ directory found.", err=True)
-        typer.echo("Run 'arche start <goal>' to create one.", err=True)
-        raise typer.Exit(1)
-    return arche_dir
+    """Get .arche/ directory or exit."""
+    if d := find_arche_dir():
+        return d
+    typer.echo("Error: No .arche/ found. Run 'arche start <goal>'.", err=True)
+    raise typer.Exit(1)
 
 
-def get_pid_file(arche_dir: Path) -> Path:
-    return arche_dir / PID_FILE
-
-
-def get_log_file(arche_dir: Path) -> Path:
-    return arche_dir / LOG_FILE
-
-
-def is_infinite(arche_dir: Path) -> bool:
-    """Check if infinite mode (flag file exists)."""
-    return (arche_dir / INFINITE_FLAG).exists()
-
-
-def set_infinite(arche_dir: Path, infinite: bool):
-    """Set or unset infinite mode flag."""
-    flag_file = arche_dir / INFINITE_FLAG
-    if infinite:
-        flag_file.touch()
-    else:
-        flag_file.unlink(missing_ok=True)
-
-
-def save_claude_args(arche_dir: Path, args: list[str]):
-    """Save extra claude args to JSON file."""
-    import json
-    args_file = arche_dir / CLAUDE_ARGS_FILE
-    if args:
-        args_file.write_text(json.dumps(args))
-    else:
-        args_file.unlink(missing_ok=True)
-
-
-def load_claude_args(arche_dir: Path) -> list[str]:
-    """Load extra claude args from JSON file."""
-    import json
-    args_file = arche_dir / CLAUDE_ARGS_FILE
-    if args_file.exists():
-        return json.loads(args_file.read_text())
-    return []
-
-
-def is_running(arche_dir: Path) -> tuple[bool, Optional[int]]:
-    """Check if Arche is running. Returns (is_running, pid)."""
-    pid_file = get_pid_file(arche_dir)
+def is_running(arche_dir: Path) -> tuple[bool, int | None]:
+    """Check if Arche is running."""
+    pid_file = arche_dir / PID
     if not pid_file.exists():
         return False, None
-
     try:
         pid = int(pid_file.read_text().strip())
-        # Check if process exists
         os.kill(pid, 0)
         return True, pid
     except (ValueError, ProcessLookupError, PermissionError):
-        # Clean up stale pid file
         pid_file.unlink(missing_ok=True)
         return False, None
 
 
-def ensure_claude_available() -> None:
-    if shutil.which("claude") is None:
-        typer.echo("Error: `claude` CLI not found in PATH.", err=True)
-        raise typer.Exit(1)
+def kill_arche(pid: int, force: bool = False):
+    """Kill Arche process group."""
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL if force else signal.SIGTERM)
+    except ProcessLookupError:
+        pass
 
 
-def build_claude_cmd(
-    turn: int,
-    arche_dir: Path,
-    goal: str | None = None,
-    extra_args: list[str] | None = None,
-    next_task: str | None = None,
-    journal_file: str | None = None,
-) -> list[str]:
-    """Build the claude CLI command for a single turn."""
+def read_file(path: Path) -> str:
+    return path.read_text() if path.exists() else ""
 
-    infinite = is_infinite(arche_dir)
 
-    # Odd turns = exec mode, Even turns = review mode
-    review_mode = (turn % 2 == 0)
+def read_latest_journal(arche_dir: Path, journal_path: str | None = None) -> str:
+    """Read specific or latest journal."""
+    if journal_path and (arche_dir / journal_path).exists():
+        return (arche_dir / journal_path).read_text()
+    journals = sorted((arche_dir / "journal").glob("*.yaml"), reverse=True) if (arche_dir / "journal").exists() else []
+    return journals[0].read_text() if journals else ""
 
-    # Select appropriate rule file
-    rule_file = arche_dir / (RULE_REVIEW_FILE if review_mode else RULE_EXEC_FILE)
 
-    cmd: list[str] = [
-        "claude", "--print",
-        "--permission-mode", "plan",
-    ]
+def parse_reviewer_json(output: str) -> dict | None:
+    """Parse JSON from reviewer output."""
+    for pattern in [r'```json\s*(\{.*?\})\s*```', r'(\{\s*"(?:status|next_task)".*?\})']:
+        if m := re.search(pattern, output, re.DOTALL):
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                pass
+    return None
 
-    # Render system prompt from RULE_EXEC.md or RULE_REVIEW.md
+
+def build_prompt(turn: int, arche_dir: Path, goal: str | None, review_mode: bool,
+                 next_task: str | None, journal_file: str | None, resumed: bool) -> str:
+    """Build user prompt from template."""
+    tpl = Template(read_file(PKG_DIR / PROMPT) or "Turn {{ turn }}.")
+    if review_mode:
+        return tpl.render(turn=turn, goal=goal, review_mode=True,
+                         prev_journal=read_latest_journal(arche_dir), resumed=resumed)
+    return tpl.render(turn=turn, goal=goal, review_mode=False,
+                     next_task=next_task or goal or "Continue with the plan",
+                     context_journal=read_latest_journal(arche_dir, journal_file) if journal_file else "")
+
+
+def build_cmd(turn: int, arche_dir: Path, goal: str | None, extra_args: list[str] | None,
+              review_mode: bool, next_task: str | None, journal_file: str | None, resumed: bool) -> list[str]:
+    """Build claude CLI command."""
+    infinite = (arche_dir / INFINITE).exists()
+    batch = (arche_dir / BATCH_MODE).exists()
+    rule_file = arche_dir / (RULE_REVIEW if review_mode else RULE_EXEC)
+
+    cmd = ["claude", "--print", "--permission-mode", "plan"]
     if rule_file.exists():
-        rule_template = Template(rule_file.read_text())
-        rule_prompt = rule_template.render(infinite=infinite)
-        cmd.extend(["--system-prompt", rule_prompt])
-
-    # Add extra claude args (passed through from arche start)
+        cmd.extend(["--system-prompt", Template(rule_file.read_text()).render(infinite=infinite, batch=batch)])
     if extra_args:
         cmd.extend(extra_args)
-
-    # Get context for prompt
-    if review_mode:
-        # Review mode: read the latest journal (just completed exec)
-        prev_journal = read_journal_file(arche_dir)
-        prompt_template = Template(get_prompt_template())
-        prompt = prompt_template.render(
-            turn=turn,
-            goal=goal,
-            review_mode=True,
-            prev_journal=prev_journal,
-        )
-    else:
-        # Exec mode: use task and journal from reviewer's response
-        context_journal = read_journal_file(arche_dir, journal_file) if journal_file else ""
-        prompt_template = Template(get_prompt_template())
-        prompt = prompt_template.render(
-            turn=turn,
-            goal=goal,
-            review_mode=False,
-            next_task=next_task or goal or "Continue with the plan",
-            context_journal=context_journal,
-        )
-
-    cmd.append(prompt)
+    cmd.append(build_prompt(turn, arche_dir, goal, review_mode, next_task, journal_file, resumed))
     return cmd
 
 
-def run_arche_loop(arche_dir: Path, goal: str | None = None, extra_args: list[str] | None = None):
-    """Main Arche loop - runs Claude in exec/review alternation."""
-    log_file = get_log_file(arche_dir)
-    infinite = is_infinite(arche_dir)
-    turn = 1
-
-    # State from reviewer's response
-    next_task: str | None = None
-    journal_file: str | None = None
+def run_loop(arche_dir: Path, goal: str | None = None, extra_args: list[str] | None = None):
+    """Main exec/review loop."""
+    log_file, infinite, turn = arche_dir / LOG, (arche_dir / INFINITE).exists(), 1
+    next_task, journal_file = None, None
 
     while True:
-        review_mode = (turn % 2 == 0)
+        # Check forced review
+        force_file = arche_dir / FORCE_REVIEW
+        if force_file.exists():
+            force_file.unlink()
+            review_mode, resumed = True, True
+        else:
+            review_mode, resumed = (turn % 2 == 0), False
 
-        # Build command with appropriate context
-        cmd = build_claude_cmd(
-            turn,
-            arche_dir,
-            goal=goal if turn == 1 else None,
-            extra_args=extra_args,
-            next_task=next_task,
-            journal_file=journal_file,
-        )
+        cmd = build_cmd(turn, arche_dir, goal if turn == 1 else None, extra_args,
+                       review_mode, next_task, journal_file, resumed)
 
         try:
-            with open(log_file, "a", encoding="utf-8") as f:
-                mode_str = "REVIEW" if review_mode else "EXEC"
-                f.write(f"\n{'='*50}\n")
-                f.write(f"Turn {turn} ({mode_str}) - {datetime.now().isoformat()}\n")
-                f.write(f"{'='*50}\n")
+            with open(log_file, "a") as f:
+                f.write(f"\n{'='*50}\nTurn {turn} ({'REVIEW' if review_mode else 'EXEC'}) - {datetime.now().isoformat()}\n{'='*50}\n")
                 f.flush()
 
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(arche_dir),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                )
-
-                full_output = ""
-                while True:
-                    chunk = proc.stdout.read(1)
-                    if not chunk:
-                        break
-                    decoded = chunk.decode('utf-8', errors='replace')
-                    full_output += decoded
-                    f.write(decoded)
+                proc = subprocess.Popen(cmd, cwd=str(arche_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                output = ""
+                while chunk := proc.stdout.read(1):
+                    output += (d := chunk.decode('utf-8', errors='replace'))
+                    f.write(d)
                     f.flush()
-
                 proc.wait()
 
-                # After review turn, parse response for next instructions
                 if review_mode:
-                    response = parse_reviewer_response(full_output)
-                    if response:
-                        f.write(f"\n\n*** Reviewer response: {response} ***\n")
-
-                        # Task mode: check for done status
-                        if not infinite and response.get("status") == "done":
-                            f.write(f"\n\n*** All work complete - Stopping ***\n")
+                    if resp := parse_reviewer_json(output):
+                        f.write(f"\n*** Reviewer: {resp} ***\n")
+                        if not infinite and resp.get("status") == "done":
+                            f.write("\n*** Done ***\n")
                             break
-
-                        # Set context for next exec turn
-                        next_task = response.get("next_task")
-                        journal_file = response.get("journal_file")
+                        next_task, journal_file = resp.get("next_task"), resp.get("journal_file")
                     else:
-                        f.write(f"\n\n*** Warning: Could not parse reviewer response ***\n")
-                        next_task = None
-                        journal_file = None
+                        f.write("\n*** Warning: No reviewer JSON ***\n")
+                        next_task, journal_file = None, None
 
                 if proc.returncode != 0:
-                    f.write(f"\n\n*** Turn {turn} failed (code {proc.returncode}) ***\n")
+                    f.write(f"\n*** Failed (code {proc.returncode}) ***\n")
                     time.sleep(5)
-
                 turn += 1
                 time.sleep(1)
-
         except Exception as e:
             with open(log_file, "a") as f:
-                f.write(f"\n\n*** Error: {e} ***\n")
+                f.write(f"\n*** Error: {e} ***\n")
             time.sleep(5)
 
 
 def daemon_main(arche_dir: Path, goal: str | None = None, extra_args: list[str] | None = None):
-    """Entry point for daemon process."""
-    pid_file = get_pid_file(arche_dir)
-
-    # Write PID
+    """Daemon entry point."""
+    pid_file = arche_dir / PID
     pid_file.write_text(str(os.getpid()))
-
     try:
-        run_arche_loop(arche_dir, goal, extra_args)
+        run_loop(arche_dir, goal, extra_args)
     finally:
         pid_file.unlink(missing_ok=True)
 
 
-@app.command(
-    context_settings={"allow_extra_args": True, "allow_interspersed_args": False}
-)
+def start_daemon(arche_dir: Path, goal: str | None, extra_args: list[str]):
+    """Start daemon process."""
+    goal_b64 = base64.b64encode((goal or "").encode()).decode()
+    args_b64 = base64.b64encode(json.dumps(extra_args).encode()).decode()
+    subprocess.Popen(
+        [sys.executable, "-c", f"""
+import sys, base64, json; sys.path.insert(0, '{PKG_DIR.parent}')
+from arche.cli import daemon_main; from pathlib import Path
+g = base64.b64decode('{goal_b64}').decode() or None
+a = json.loads(base64.b64decode('{args_b64}').decode())
+daemon_main(Path('{arche_dir}'), g, a)
+"""],
+        start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def tail_log(arche_dir: Path):
+    """Tail log file."""
+    log_file = arche_dir / LOG
+    if not log_file.exists():
+        log_file.write_text("")
+    try:
+        subprocess.run(["tail", "-f", "-n", "100", str(log_file)])
+    except KeyboardInterrupt:
+        typer.echo("\nDetached. Arche continues in background.", err=True)
+
+
+@app.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": False})
 def start(
     ctx: typer.Context,
-    goal: str = typer.Argument(..., help="The main goal for Arche to achieve"),
-    infinite: bool = typer.Option(False, "--infinite", "-i", help="Run infinitely, keep finding next goals"),
-    force: bool = typer.Option(False, "--force", "-f", help="Restart if already running"),
+    goal: str = typer.Argument(..., help="Goal for Arche to achieve"),
+    infinite: bool = typer.Option(False, "-i", "--infinite", help="Run infinitely"),
+    batch: bool = typer.Option(False, "-b", "--batch", help="Exec all tasks at once (no incremental)"),
+    force: bool = typer.Option(False, "-f", "--force", help="Restart if running"),
 ):
-    """Start Arche with a goal. Creates .arche/ if needed.
-
-    Extra arguments after -- are passed to claude CLI.
-    Example: arche start "goal" -- --model opus --add-dir ../other
-    """
-    ensure_claude_available()
+    """Start Arche. Extra args after -- go to claude CLI."""
+    if not shutil.which("claude"):
+        typer.echo("Error: claude CLI not found.", err=True)
+        raise typer.Exit(1)
 
     arche_dir = Path.cwd() / ".arche"
-    is_new = not arche_dir.exists()
-    extra_args = ctx.args  # Capture extra args for claude
+    extra_args = ctx.args
 
-    # Check if already running
     if arche_dir.exists():
         running, pid = is_running(arche_dir)
         if running and not force:
-            typer.echo(f"Arche already running (PID {pid}). Use --force to restart.", err=True)
-            typer.echo("Tailing log...", err=True)
-            tail_log(arche_dir)
-            return
-        elif running and force:
-            typer.echo(f"Stopping existing Arche (PID {pid})...", err=True)
-            os.kill(pid, signal.SIGTERM)
+            typer.echo(f"Already running (PID {pid}). Use -f to restart.", err=True)
+            return tail_log(arche_dir)
+        if running:
+            typer.echo(f"Stopping PID {pid}...")
+            kill_arche(pid)
             time.sleep(1)
 
-    # Create directory structure
     arche_dir.mkdir(exist_ok=True)
+    for rf, rm in [(RULE_EXEC, False), (RULE_REVIEW, True)]:
+        dest = arche_dir / rf
+        if not dest.exists() or force:
+            dest.write_text(read_file(PKG_DIR / rf))
 
-    # Copy RULE files from package
-    for rule_file, review_mode in [(RULE_EXEC_FILE, False), (RULE_REVIEW_FILE, True)]:
-        rule_dest = arche_dir / rule_file
-        if not rule_dest.exists() or force:
-            rule_dest.write_text(get_rule_content(review_mode))
+    (arche_dir / INFINITE).touch() if infinite else (arche_dir / INFINITE).unlink(missing_ok=True)
+    (arche_dir / BATCH_MODE).touch() if batch else (arche_dir / BATCH_MODE).unlink(missing_ok=True)
+    (arche_dir / CLAUDE_ARGS).write_text(json.dumps(extra_args)) if extra_args else (arche_dir / CLAUDE_ARGS).unlink(missing_ok=True)
+    (arche_dir / LOG).write_text(f"Started: {datetime.now().isoformat()}\nGoal: {goal}\n")
 
-    # Set infinite mode flag
-    set_infinite(arche_dir, infinite)
-
-    # Save extra claude args for resume
-    save_claude_args(arche_dir, extra_args)
-
-    # Clear old log
-    log_file = get_log_file(arche_dir)
-    log_file.write_text(f"Arche started: {datetime.now().isoformat()}\nGoal: {goal}\n\n")
-
-    if is_new:
-        typer.echo(f"Created .arche/ at {arche_dir}")
     typer.echo(f"Goal: {goal}")
-    if extra_args:
-        typer.echo(f"Claude args: {' '.join(extra_args)}")
-    typer.echo("Starting Arche in background...")
-
-    # Start daemon process (pass goal and args via base64 to avoid escaping issues)
-    import base64
-    import json
-    goal_b64 = base64.b64encode(goal.encode()).decode()
-    args_b64 = base64.b64encode(json.dumps(extra_args).encode()).decode()
-    proc = subprocess.Popen(
-        [sys.executable, "-c", f"""
-import sys, base64, json
-sys.path.insert(0, '{Path(__file__).parent.parent}')
-from arche.cli import daemon_main
-from pathlib import Path
-goal = base64.b64decode('{goal_b64}').decode()
-extra_args = json.loads(base64.b64decode('{args_b64}').decode())
-daemon_main(Path('{arche_dir}'), goal, extra_args)
-"""],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
+    start_daemon(arche_dir, goal, extra_args)
     time.sleep(0.5)
-    typer.echo(f"Arche running (PID {proc.pid}). Ctrl+C to detach from log.")
     tail_log(arche_dir)
 
 
 @app.command()
 def stop():
-    """Stop running Arche."""
+    """Stop Arche and Claude subprocess."""
     arche_dir = get_arche_dir()
     running, pid = is_running(arche_dir)
-
     if not running:
-        typer.echo("Arche is not running.", err=True)
+        typer.echo("Not running.", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Stopping Arche (PID {pid})...")
-
-    # Kill process group to include child processes (claude)
-    try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-
-    # Wait for process to end
+    typer.echo(f"Stopping PID {pid}...")
+    kill_arche(pid)
     for _ in range(10):
         time.sleep(0.5)
-        running, _ = is_running(arche_dir)
-        if not running:
-            typer.echo("Arche stopped.")
+        if not is_running(arche_dir)[0]:
+            typer.echo("Stopped.")
             return
-
-    # Force kill
-    try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-
-    get_pid_file(arche_dir).unlink(missing_ok=True)
-    typer.echo("Arche killed.")
+    kill_arche(pid, force=True)
+    (arche_dir / PID).unlink(missing_ok=True)
+    typer.echo("Killed.")
 
 
 @app.command()
 def resume():
-    """Resume Arche (restart if stopped)."""
+    """Resume Arche (starts with review mode)."""
     arche_dir = get_arche_dir()
     running, pid = is_running(arche_dir)
-
     if running:
-        typer.echo(f"Arche already running (PID {pid}). Tailing log...")
-        tail_log(arche_dir)
-        return
+        typer.echo(f"Already running (PID {pid}).")
+        return tail_log(arche_dir)
 
-    # Load saved claude args
-    extra_args = load_claude_args(arche_dir)
+    extra_args = json.loads(read_file(arche_dir / CLAUDE_ARGS) or "[]")
+    (arche_dir / FORCE_REVIEW).touch()
 
-    typer.echo("Resuming Arche...")
-    if extra_args:
-        typer.echo(f"Claude args: {' '.join(extra_args)}")
+    with open(arche_dir / LOG, "a") as f:
+        f.write(f"\n{'='*50}\nResumed: {datetime.now().isoformat()}\n{'='*50}\n")
 
-    # Append to log
-    log_file = get_log_file(arche_dir)
-    with open(log_file, "a") as f:
-        f.write(f"\n\n{'='*50}\nResumed: {datetime.now().isoformat()}\n{'='*50}\n\n")
-
-    # Start daemon (no goal - Arche reads from its own plan files)
-    import base64
-    import json
-    args_b64 = base64.b64encode(json.dumps(extra_args).encode()).decode()
-    proc = subprocess.Popen(
-        [sys.executable, "-c", f"""
-import sys, base64, json
-sys.path.insert(0, '{Path(__file__).parent.parent}')
-from arche.cli import daemon_main
-from pathlib import Path
-extra_args = json.loads(base64.b64decode('{args_b64}').decode())
-daemon_main(Path('{arche_dir}'), None, extra_args)
-"""],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
+    typer.echo("Resuming (review mode)...")
+    start_daemon(arche_dir, None, extra_args)
     time.sleep(0.5)
-    typer.echo(f"Arche running (PID {proc.pid}). Ctrl+C to detach from log.")
     tail_log(arche_dir)
-
-
-def tail_log(arche_dir: Path):
-    """Tail the log file."""
-    log_file = get_log_file(arche_dir)
-    if not log_file.exists():
-        log_file.write_text("")
-
-    try:
-        subprocess.run(["tail", "-f", "-n", "100", str(log_file)])
-    except KeyboardInterrupt:
-        typer.echo("\nDetached from log. Arche continues in background.", err=True)
 
 
 @app.command()
 def log(
-    follow: bool = typer.Option(True, "--follow/--no-follow", "-f", help="Follow log in real-time"),
-    lines: int = typer.Option(100, "--lines", "-n", help="Number of lines to show"),
-    clear: bool = typer.Option(False, "--clear", "-c", help="Clear log file"),
+    follow: bool = typer.Option(True, "-f/--no-follow", help="Follow in real-time"),
+    lines: int = typer.Option(100, "-n", "--lines", help="Lines to show"),
+    clear: bool = typer.Option(False, "-c", "--clear", help="Clear log"),
 ):
-    """Show Arche logs."""
+    """Show logs (real-time by default)."""
     arche_dir = get_arche_dir()
-    log_file = get_log_file(arche_dir)
-
+    log_file = arche_dir / LOG
     if clear:
         log_file.write_text("")
-        typer.echo("Log cleared.")
-        return
-
+        return typer.echo("Cleared.")
     if not log_file.exists():
-        typer.echo("No log file yet.", err=True)
+        typer.echo("No log.", err=True)
         raise typer.Exit(1)
-
     if follow:
         tail_log(arche_dir)
     else:
-        content = log_file.read_text()
-        for line in content.split('\n')[-lines:]:
-            typer.echo(line)
+        typer.echo("\n".join(log_file.read_text().split('\n')[-lines:]))
 
 
 @app.command()
 def status():
-    """Show Arche status."""
-    arche_dir = find_arche_dir()
-
-    if not arche_dir:
-        typer.echo("No .arche/ found.")
-        return
-
-    typer.echo(f"Arche dir: {arche_dir}")
-    typer.echo(f"Project root: {arche_dir.parent}")
-
+    """Show status (running/stopped, mode)."""
+    if not (arche_dir := find_arche_dir()):
+        return typer.echo("No .arche/ found.")
     running, pid = is_running(arche_dir)
-    if running:
-        typer.echo(f"Status: Running (PID {pid})")
-    else:
-        typer.echo("Status: Stopped")
-
-    typer.echo(f"Mode: {'infinite' if is_infinite(arche_dir) else 'task'}")
+    mode = ("infinite" if (arche_dir / INFINITE).exists() else "task") + (" batch" if (arche_dir / BATCH_MODE).exists() else "")
+    typer.echo(f"Dir: {arche_dir}")
+    typer.echo(f"Status: {'Running (PID ' + str(pid) + ')' if running else 'Stopped'}")
+    typer.echo(f"Mode: {mode}")
 
 
 @app.command()
 def feedback(
     message: str = typer.Argument(..., help="Feedback message"),
-    priority: str = typer.Option("medium", "--priority", "-p", help="high, medium, low"),
+    priority: str = typer.Option("medium", "-p", help="high/medium/low"),
+    now: bool = typer.Option(False, "-n", "--now", help="Interrupt and review now"),
 ):
-    """Add feedback for Arche to process."""
+    """Add feedback. Use --now to interrupt current task."""
     arche_dir = get_arche_dir()
-    pending_dir = arche_dir / "feedback" / "pending"
-    pending_dir.mkdir(parents=True, exist_ok=True)
+    pending = arche_dir / "feedback" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
 
-    now = datetime.now()
-    ts = now.strftime("%Y%m%d-%H%M")
-    slug = message[:30].lower().replace(" ", "-").replace("/", "-")
+    ts = datetime.now()
+    slug = re.sub(r'[^a-z0-9-]', '-', message[:30].lower())
+    (pending / f"{ts:%Y%m%d-%H%M}-{slug}.yaml").write_text(
+        f'meta:\n  timestamp: "{ts.isoformat()}"\nsummary: "{message}"\npriority: "{priority}"\nstatus: "pending"\n'
+    )
+    typer.echo(f"Feedback added.")
 
-    content = f"""meta:
-  timestamp: "{now.isoformat()}"
-  kind: feedback
-  id: "{ts}-feedback"
-summary: "{message}"
-priority: "{priority}"
-status: "pending"
-"""
-
-    filepath = pending_dir / f"{ts}-{slug}.yaml"
-    filepath.write_text(content)
-    typer.echo(f"Feedback added: {filepath.name}")
+    if now:
+        (arche_dir / FORCE_REVIEW).touch()
+        running, pid = is_running(arche_dir)
+        if running:
+            typer.echo(f"Interrupting PID {pid}...")
+            kill_arche(pid)
+        else:
+            typer.echo("Not running. Use 'arche resume'.")
 
 
 @app.command()

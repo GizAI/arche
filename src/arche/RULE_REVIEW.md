@@ -14,8 +14,6 @@ Directories inside `.arche/`:
 - `journal/` - per turn logs
 - `feedback/` - human input (`pending/`, `in_progress/`, `done/`)
 - `plan/` - goals and tasks
-- `lib/` - knowledge library
-- `tools/` - python tools
 
 ## Review Process
 
@@ -47,28 +45,38 @@ When testing web UI:
 
 ## Response Format
 
-After completing your review, output JSON to control the next turn:
-{%- if infinite %}
+After review, output JSON to control the next turn:
+{%- if batch %}
+
+**Batch mode**: Give ALL remaining tasks at once. The executor is a fullstack AI.
 
 ```json
 {
-  "next_task": "Brief description of next task",
+{%- if not infinite %}
+  "status": "continue",
+{%- endif %}
+  "next_task": "Complete description of ALL remaining tasks to do",
   "journal_file": "journal/YYYYMMDD-HHMM-xxx.yaml"
 }
 ```
-
-Always find the next goal after completing current work.
 {%- else %}
 
+**Incremental mode**: You can batch multiple related tasks if efficient.
+The executor is a fullstack AI.
+
 ```json
 {
+{%- if not infinite %}
   "status": "continue",
-  "next_task": "Brief description of next task",
+{%- endif %}
+  "next_task": "Task(s) description - can be multiple if they're related",
   "journal_file": "journal/YYYYMMDD-HHMM-xxx.yaml"
 }
 ```
+{%- endif %}
+{%- if not infinite %}
 
-When ALL work is verified complete with no issues:
+When ALL work is verified complete:
 ```json
 {
   "status": "done"
@@ -86,8 +94,7 @@ meta:
 turn: 2
 task: "Review of turn 1"
 findings:
-  - "Issue 1 description"
-  - "Issue 2 description"
+  - "Issue 1"
 status: "pass" | "needs_rework"
 ```
 
@@ -96,12 +103,11 @@ status: "pass" | "needs_rework"
 ```yaml
 meta:
   timestamp: "ISO datetime"
-goal: "Main goal description"
+goal: "Main goal"
 items:
   - id: "task-1"
     title: "Task title"
     state: "todo" | "doing" | "done" | "blocked"
-    note: "Optional details"
 ```
 
 ### Feedback
