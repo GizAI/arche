@@ -70,9 +70,12 @@ function getStatusStyle(state: string): { bg: string; text: string } {
       </button>
     </div>
 
-    <div class="flex-1 flex gap-4 min-h-0">
+    <div class="flex-1 flex flex-col md:flex-row gap-4 min-h-0">
       <!-- File list -->
-      <div class="w-72 bg-[var(--color-bg-subtle)] rounded-lg border border-[var(--color-border)] overflow-hidden flex flex-col">
+      <div
+        class="bg-[var(--color-bg-subtle)] rounded-lg border border-[var(--color-border)] overflow-hidden flex flex-col"
+        :class="selectedFile ? 'hidden md:flex md:w-72' : 'flex-1 md:flex-none md:w-72'"
+      >
         <div class="px-3 py-2 border-b border-[var(--color-border)] text-xs font-mono text-[var(--color-text-muted)]">
           {{ plans.length }} plan{{ plans.length === 1 ? '' : 's' }}
         </div>
@@ -96,10 +99,19 @@ function getStatusStyle(state: string): { bg: string; text: string } {
       </div>
 
       <!-- Content viewer -->
-      <div class="flex-1 bg-[var(--color-bg-subtle)] rounded-lg border border-[var(--color-border)] overflow-hidden flex flex-col">
+      <div
+        class="bg-[var(--color-bg-subtle)] rounded-lg border border-[var(--color-border)] overflow-hidden flex-col"
+        :class="selectedFile ? 'flex flex-1' : 'hidden md:flex md:flex-1'"
+      >
         <template v-if="selectedFile">
-          <div class="px-4 py-2 border-b border-[var(--color-border)] text-sm font-mono text-[var(--color-text-muted)]">
-            {{ selectedFile }}
+          <div class="px-4 py-2 border-b border-[var(--color-border)] flex items-center gap-3">
+            <button
+              @click="selectedFile = null"
+              class="md:hidden text-xs font-mono text-[var(--color-accent)] hover:underline"
+            >
+              ← Back
+            </button>
+            <span class="text-sm font-mono text-[var(--color-text-muted)] truncate">{{ selectedFile }}</span>
           </div>
           <div class="flex-1 overflow-auto p-4">
             <!-- Parsed plan view -->

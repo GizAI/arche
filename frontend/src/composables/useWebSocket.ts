@@ -1,6 +1,11 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useAgentStore } from '@/stores/agent'
 
+function createWebSocket(path: string): WebSocket {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return new WebSocket(`${protocol}//${window.location.host}${path}`)
+}
+
 export function useLogsWebSocket() {
   const store = useAgentStore()
   const ws = ref<WebSocket | null>(null)
@@ -8,9 +13,7 @@ export function useLogsWebSocket() {
   const maxReconnectAttempts = 10
 
   function connect() {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
-    ws.value = new WebSocket(`${protocol}//${host}/ws/logs`)
+    ws.value = createWebSocket('/ws/logs')
 
     ws.value.onopen = () => {
       store.setWsConnected(true)
@@ -24,26 +27,21 @@ export function useLogsWebSocket() {
       } else if (data.type === 'append') {
         store.appendLog(data.content)
       }
-      // Ignore ping messages
     }
 
     ws.value.onclose = () => {
       store.setWsConnected(false)
-      // Attempt reconnect
       if (reconnectAttempts.value < maxReconnectAttempts) {
         reconnectAttempts.value++
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.value), 30000)
-        setTimeout(connect, delay)
+        setTimeout(connect, Math.min(1000 * 2 ** reconnectAttempts.value, 30000))
       }
     }
 
-    ws.value.onerror = () => {
-      ws.value?.close()
-    }
+    ws.value.onerror = () => ws.value?.close()
   }
 
   function disconnect() {
-    reconnectAttempts.value = maxReconnectAttempts // Prevent reconnection
+    reconnectAttempts.value = maxReconnectAttempts
     ws.value?.close()
   }
 
@@ -59,9 +57,7 @@ export function useEventsWebSocket(onStateChange?: (state: any) => void) {
   const maxReconnectAttempts = 10
 
   function connect() {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
-    ws.value = new WebSocket(`${protocol}//${host}/ws/events`)
+    ws.value = createWebSocket('/ws/events')
 
     ws.value.onopen = () => {
       reconnectAttempts.value = 0
@@ -77,14 +73,11 @@ export function useEventsWebSocket(onStateChange?: (state: any) => void) {
     ws.value.onclose = () => {
       if (reconnectAttempts.value < maxReconnectAttempts) {
         reconnectAttempts.value++
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.value), 30000)
-        setTimeout(connect, delay)
+        setTimeout(connect, Math.min(1000 * 2 ** reconnectAttempts.value, 30000))
       }
     }
 
-    ws.value.onerror = () => {
-      ws.value?.close()
-    }
+    ws.value.onerror = () => ws.value?.close()
   }
 
   function disconnect() {

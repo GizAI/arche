@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import axios from 'axios'
 
 export interface FileItem {
   name: string
@@ -25,11 +26,10 @@ export const useFilesStore = defineStore('files', () => {
     loading.value = true
     error.value = null
     try {
-      const res = await fetch('/api/files')
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      tree.value = await res.json()
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to fetch files'
+      const res = await axios.get('/api/files')
+      tree.value = res.data
+    } catch (e: any) {
+      error.value = e.response?.data?.detail || e.message || 'Failed to fetch files'
     } finally {
       loading.value = false
     }
@@ -39,12 +39,11 @@ export const useFilesStore = defineStore('files', () => {
     loading.value = true
     error.value = null
     try {
-      const res = await fetch(`/api/files/${encodeURIComponent(path)}`)
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      currentFile.value = await res.json()
+      const res = await axios.get(`/api/files/${encodeURIComponent(path)}`)
+      currentFile.value = res.data
       return currentFile.value
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to read file'
+    } catch (e: any) {
+      error.value = e.response?.data?.detail || e.message || 'Failed to read file'
       throw e
     } finally {
       loading.value = false
@@ -55,15 +54,10 @@ export const useFilesStore = defineStore('files', () => {
     loading.value = true
     error.value = null
     try {
-      const res = await fetch(`/api/files/${encodeURIComponent(path)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path, content }),
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      await axios.put(`/api/files/${encodeURIComponent(path)}`, { path, content })
       return true
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to write file'
+    } catch (e: any) {
+      error.value = e.response?.data?.detail || e.message || 'Failed to write file'
       throw e
     } finally {
       loading.value = false

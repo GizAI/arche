@@ -34,6 +34,7 @@ const statusText = computed(() => {
       <div class="flex items-center gap-2">
         <span
           class="w-2 h-2 rounded-full"
+          :class="{ 'pulse-glow': status?.running && !status?.paused }"
           :style="{ backgroundColor: statusColor }"
         />
         <span class="text-xs font-mono" :style="{ color: statusColor }">
@@ -44,7 +45,7 @@ const statusText = computed(() => {
       <template v-if="status">
         <span class="text-[var(--color-border)]">│</span>
         <span class="text-xs text-[var(--color-text-muted)] font-mono">
-          Turn {{ status.turn }}
+          Turn <span :key="status.turn" class="count-up">{{ status.turn }}</span>
         </span>
         <span v-if="status.last_mode" class="text-xs text-[var(--color-text-subtle)] font-mono">
           ({{ status.last_mode }})

@@ -15,6 +15,8 @@ const parsedYaml = ref<any>(null)
 
 // New feedback form
 const showNewForm = ref(false)
+const submitting = ref(false)
+const submitSuccess = ref(false)
 const newFeedback = ref({
   message: '',
   priority: 'medium',
@@ -81,18 +83,24 @@ const priorityColors: Record<string, { bg: string; text: string }> = {
 
 async function submitFeedback() {
   if (!newFeedback.value.message.trim()) return
+  submitting.value = true
   try {
     await agentStore.submitFeedback(
       newFeedback.value.message,
       newFeedback.value.priority,
       newFeedback.value.interrupt
     )
+    submitSuccess.value = true
+    await new Promise(resolve => setTimeout(resolve, 800))
     showNewForm.value = false
     newFeedback.value.message = ''
     newFeedback.value.interrupt = false
     await filesStore.fetchTree()
+    submitSuccess.value = false
   } catch {
     // Error handled by store
+  } finally {
+    submitting.value = false
   }
 }
 </script>
@@ -151,18 +159,25 @@ async function submitFeedback() {
           </label>
           <button
             @click="submitFeedback"
-            :disabled="!newFeedback.message.trim()"
-            class="px-4 py-2 rounded font-mono text-sm bg-[var(--color-accent)] text-[var(--color-bg)] hover:bg-[var(--color-accent-muted)] disabled:opacity-50 transition-colors mt-4 ml-auto"
+            :disabled="!newFeedback.message.trim() || submitting"
+            class="px-4 py-2 rounded font-mono text-sm transition-all duration-300 mt-4 ml-auto relative overflow-hidden"
+            :class="submitSuccess
+              ? 'bg-[var(--color-success)] text-white'
+              : 'bg-[var(--color-accent)] text-[var(--color-bg)] hover:bg-[var(--color-accent-muted)] disabled:opacity-50'"
           >
-            Submit
+            <span v-if="!submitSuccess">{{ submitting ? 'Submitting...' : 'Submit' }}</span>
+            <span v-else class="inline-block success-check">✓</span>
           </button>
         </div>
       </div>
     </div>
 
-    <div class="flex-1 flex gap-4 min-h-0">
+    <div class="flex-1 flex flex-col md:flex-row gap-4 min-h-0">
       <!-- File list -->
-      <div class="w-80 bg-[var(--color-bg-subtle)] rounded-lg border border-[var(--color-border)] overflow-hidden flex flex-col">
+      <div
+        class="bg-[var(--color-bg-subtle)] rounded-lg border border-[var(--color-border)] overflow-hidden flex flex-col"
+        :class="selectedFile ? 'hidden md:flex md:w-80' : 'flex-1 md:flex-none md:w-80'"
+      >
         <!-- Tabs -->
         <div class="flex border-b border-[var(--color-border)]">
           <button
@@ -224,10 +239,19 @@ async function submitFeedback() {
       </div>
 
       <!-- Content viewer -->
-      <div class="flex-1 bg-[var(--color-bg-subtle)] rounded-lg border border-[var(--color-border)] overflow-hidden flex flex-col">
+      <div
+        class="bg-[var(--color-bg-subtle)] rounded-lg border border-[var(--color-border)] overflow-hidden flex-col"
+        :class="selectedFile ? 'flex flex-1' : 'hidden md:flex md:flex-1'"
+      >
         <template v-if="selectedFile">
-          <div class="px-4 py-2 border-b border-[var(--color-border)] text-sm font-mono text-[var(--color-text-muted)]">
-            {{ selectedFile }}
+          <div class="px-4 py-2 border-b border-[var(--color-border)] flex items-center gap-3">
+            <button
+              @click="selectedFile = null"
+              class="md:hidden text-xs font-mono text-[var(--color-accent)] hover:underline"
+            >
+              ← Back
+            </button>
+            <span class="text-sm font-mono text-[var(--color-text-muted)] truncate">{{ selectedFile }}</span>
           </div>
           <div class="flex-1 overflow-auto p-4">
             <div v-if="parsedYaml" class="space-y-4">

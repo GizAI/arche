@@ -62,7 +62,7 @@ function handleScroll() {
   <div
     ref="containerRef"
     @scroll="handleScroll"
-    class="h-64 overflow-auto p-4 font-mono text-xs leading-relaxed bg-[var(--color-bg)]"
+    class="h-full overflow-auto p-4 font-mono text-xs leading-relaxed bg-[var(--color-bg)]"
   >
     <div v-if="!content" class="text-[var(--color-text-subtle)]">
       No logs yet...

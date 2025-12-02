@@ -171,7 +171,10 @@ def start_session(arche_dir: Path, goal: str, engine: str, model: str | None,
 
     (arche_dir / INFINITE).touch() if infinite else (arche_dir / INFINITE).unlink(missing_ok=True)
     (arche_dir / STEP_MODE).touch() if step else (arche_dir / STEP_MODE).unlink(missing_ok=True)
-    (arche_dir / LOG).write_text(f"Started: {datetime.now().isoformat()}\nGoal: {goal}\nEngine: {engine}\n")
+    (arche_dir / LOG).write_text(
+        f"\033[33m{'━'*50}\033[0m\n\033[1;33m▶ Started\033[0m \033[2m{datetime.now().strftime('%H:%M:%S')}\033[0m\n\033[33m{'━'*50}\033[0m\n"
+        f"\033[2mGoal:\033[0m {goal}\n\033[2mEngine:\033[0m {engine}\n"
+    )
 
     start_daemon(arche_dir)
 
@@ -220,26 +223,28 @@ def read_goal_from_plan(arche_dir: Path) -> str | None:
     return None
 
 
-def read_feedback(arche_dir: Path) -> str:
-    """Read all pending feedback files (any extension)."""
+def read_feedback(arche_dir: Path) -> tuple[str, list[Path]]:
+    """Read all pending feedback files (any extension). Returns (content, files)."""
     feedback_dir = arche_dir / "feedback"
     if not feedback_dir.exists():
-        return ""
+        return "", []
     files = sorted(f for f in feedback_dir.iterdir() if f.is_file())
     if not files:
-        return ""
-    return "\n\n".join(f"### {f.name}\n{f.read_text()}" for f in files)
+        return "", []
+    content = "\n\n".join(f"### {f.name}\n{f.read_text()}" for f in files)
+    return content, files
 
 
-def archive_feedback(arche_dir: Path):
-    """Move all feedback files to archive."""
+def archive_feedback(arche_dir: Path, files: list[Path] | None = None):
+    """Move specified feedback files to archive. If files is None, move all."""
     feedback_dir = arche_dir / "feedback"
     archive_dir = feedback_dir / "archive"
     if not feedback_dir.exists():
         return
     archive_dir.mkdir(exist_ok=True)
-    for f in feedback_dir.iterdir():
-        if f.is_file():
+    targets = files if files else [f for f in feedback_dir.iterdir() if f.is_file()]
+    for f in targets:
+        if f.exists() and f.is_file():
             f.rename(archive_dir / f.name)
 
 
@@ -264,13 +269,14 @@ def build_system_prompt(arche_dir: Path, mode: str) -> str:
 
 
 def build_user_prompt(turn: int, arche_dir: Path, mode: str,
-                      next_task: str | None, journal_file: str | None) -> str:
+                      next_task: str | None, journal_file: str | None,
+                      feedback: str = "") -> str:
     template = Template(get_template(arche_dir, "PROMPT.md"))
     return template.render(
         turn=turn,
         mode=mode,
         goal=read_goal_from_plan(arche_dir),  # From plan, not state
-        feedback=read_feedback(arche_dir),
+        feedback=feedback,
         prev_journal=read_latest_journal(arche_dir),
         next_task=next_task,
         context_journal=read_latest_journal(arche_dir, journal_file),
@@ -359,13 +365,16 @@ async def run_loop(arche_dir: Path):
         else:
             mode = natural_mode
 
+        # Read feedback once (to archive only these files later)
+        feedback_content, feedback_files = read_feedback(arche_dir)
+
         system_prompt = build_system_prompt(arche_dir, mode)
-        user_prompt = build_user_prompt(turn, arche_dir, mode, next_task, journal_file)
+        user_prompt = build_user_prompt(turn, arche_dir, mode, next_task, journal_file, feedback_content)
         engine = create_engine(engine_type, **engine_kwargs)
 
         try:
             with open(log_file, "a") as f:
-                f.write(f"\n{'='*50}\nTurn {turn} ({mode.upper()}) - {datetime.now().isoformat()}\n{'='*50}\n")
+                f.write(f"\n\033[33m{'━'*50}\033[0m\n\033[1;33m▶ Turn {turn}\033[0m \033[2m{mode.upper()} • {datetime.now().strftime('%H:%M:%S')}\033[0m\n\033[33m{'━'*50}\033[0m\n")
                 f.flush()
 
                 output, seen_tools, last_was_tool = "", set(), False
@@ -382,33 +391,35 @@ async def run_loop(arche_dir: Path):
                         if tool_id:
                             seen_tools.add(tool_id)
                         prefix = "\n" if not last_was_tool else ""
-                        f.write(f"{prefix}[TOOL] {event.tool_name} {format_tool_args(event.tool_name, event.tool_args)}\n")
+                        f.write(f"{prefix}\033[36m●\033[0m \033[1m{event.tool_name}\033[0m {format_tool_args(event.tool_name, event.tool_args)}\n")
                         f.flush()
                         last_was_tool = True
                     elif event.type == EventType.ERROR:
-                        f.write(f"\n*** Error: {event.error} ***\n")
+                        f.write(f"\n\033[31m✖ Error:\033[0m {event.error}\n")
                         f.flush()
                         last_was_tool = False
 
                 if mode in ("review", "retro", "plan"):
                     if resp := parse_response_json(output):
-                        f.write(f"\n*** {mode.upper()}: {resp} ***\n")
+                        f.write(f"\n\033[2m◆ {mode.upper()}: {resp}\033[0m\n")
                         if not infinite and resp.get("status") == "done":
                             cl = resp.get("checklist", {})
                             missing = [k for k in load_checklist(arche_dir) if not cl.get(k)]
                             if not missing:
-                                f.write("\n*** Done ***\n")
-                                archive_feedback(arche_dir)
+                                f.write("\n\033[32m╭" + "─"*48 + "╮\n" +
+                                        "│" + " "*16 + "🎉 ✨ DONE ✨ 🎉" + " "*16 + "│\n" +
+                                        "╰" + "─"*48 + "╯\033[0m\n")
+                                archive_feedback(arche_dir, feedback_files)
                                 break
-                            f.write(f"\n*** Done rejected: missing {missing} ***\n")
+                            f.write(f"\n\033[33m⚠ Done rejected:\033[0m missing {missing}\n")
                             next_task = f"Complete checklist: {missing}"
                         else:
                             next_task = resp.get("next_task")
                         journal_file = resp.get("journal_file")
                     else:
-                        f.write(f"\n*** Warning: No {mode} JSON ***\n")
+                        f.write(f"\n\033[33m⚠ Warning:\033[0m No {mode} JSON\n")
                         next_task, journal_file = None, None
-                    archive_feedback(arche_dir)
+                    archive_feedback(arche_dir, feedback_files)
                 else:
                     next_task, journal_file = None, None
 
@@ -422,7 +433,7 @@ async def run_loop(arche_dir: Path):
 
         except Exception as e:
             with open(log_file, "a") as f:
-                f.write(f"\n*** Error: {e} ***\n")
+                f.write(f"\n\033[31m✖ Error:\033[0m {e}\n")
             await asyncio.sleep(5)
 
 
@@ -502,7 +513,7 @@ def resume(
         typer.echo(f"Feedback: {msg[:50]}...")
 
     # Auto-enable review mode if there's pending feedback
-    if read_feedback(arche_dir):
+    if read_feedback(arche_dir)[0]:
         review = True
 
     mode_str = ""
@@ -528,7 +539,7 @@ def resume(
             mode_str = f" ({forced})"
 
     with open(arche_dir / LOG, "a") as f:
-        f.write(f"\n{'='*50}\nResumed: {datetime.now().isoformat()} (turn {turn}){mode_str}\n{'='*50}\n")
+        f.write(f"\n\033[33m{'━'*50}\033[0m\n\033[1;33m▷ Resumed\033[0m \033[2mTurn {turn}{mode_str} • {datetime.now().strftime('%H:%M:%S')}\033[0m\n\033[33m{'━'*50}\033[0m\n")
 
     typer.echo(f"Resuming turn {turn}{mode_str}...")
     start_daemon(arche_dir)
@@ -640,16 +651,42 @@ serve_app = typer.Typer(name="serve", help="Web UI server commands", no_args_is_
 app.add_typer(serve_app)
 
 
-def _stop_server(arche_dir: Path) -> bool:
+def _kill_port_process(port: int) -> bool:
+    """Kill process occupying port. Returns True if killed."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"], capture_output=True, text=True
+        )
+        pids = result.stdout.strip().split('\n')
+        for pid in pids:
+            if pid.isdigit():
+                kill_process(int(pid))
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _stop_server(arche_dir: Path, port: int = 8420) -> bool:
     """Stop server if running. Returns True if was running."""
+    stopped = False
+
+    # Try PID file first
     running, pid = check_pid(arche_dir / SERVER_PID)
-    if not running:
-        return False
-    typer.echo(f"Stopping server (PID {pid})...")
-    kill_process(pid)
-    time.sleep(1)
-    (arche_dir / SERVER_PID).unlink(missing_ok=True)
-    return True
+    if running:
+        typer.echo(f"Stopping server (PID {pid})...")
+        kill_process(pid)
+        stopped = True
+
+    # Also kill any process on the port
+    if _kill_port_process(port):
+        stopped = True
+
+    if stopped:
+        time.sleep(0.5)
+        (arche_dir / SERVER_PID).unlink(missing_ok=True)
+
+    return stopped
 
 
 def _show_server_log(arche_dir: Path, lines: int = 50):
@@ -698,9 +735,11 @@ def serve_start(
 
 
 @serve_app.command(name="stop")
-def serve_stop():
+def serve_stop(
+    port: int = typer.Option(8420, "-p", "--port", help="Server port"),
+):
     """Stop web UI server."""
-    if _stop_server(Path.cwd() / ".arche"):
+    if _stop_server(Path.cwd() / ".arche", port):
         typer.echo("Stopped.")
     else:
         typer.echo("Server not running.", err=True)
@@ -715,7 +754,8 @@ def serve_restart(
 ):
     """Restart web UI server."""
     arche_dir = Path.cwd() / ".arche"
-    _stop_server(arche_dir)
+    _stop_server(arche_dir, port)
+    time.sleep(0.5)
     _start_server(arche_dir, host, port, password)
 
 

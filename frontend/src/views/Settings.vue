@@ -58,14 +58,14 @@ function resetRules() {
 </script>
 
 <template>
-  <div class="max-w-4xl mx-auto space-y-6">
+  <div class="h-full flex flex-col space-y-6 p-6">
     <!-- Header -->
     <h1 class="text-xl font-mono text-[var(--color-text)]">Settings</h1>
 
     <!-- Connection Info -->
     <div class="bg-[var(--color-bg-subtle)] rounded-lg border border-[var(--color-border)] p-4">
       <h2 class="text-sm font-mono text-[var(--color-text-muted)] mb-3">Connection</h2>
-      <div class="grid grid-cols-2 gap-4 text-sm">
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
         <div>
           <span class="text-[var(--color-text-subtle)]">Status:</span>
           <span class="ml-2 text-[var(--color-text)]">

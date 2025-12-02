@@ -82,7 +82,7 @@ function downloadLogs() {
 <template>
   <div class="h-full flex flex-col">
     <!-- Header -->
-    <div class="flex items-center justify-between mb-4">
+    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
       <div class="flex items-center gap-4">
         <h1 class="text-xl font-mono text-[var(--color-text)]">Logs</h1>
         <div class="flex items-center gap-2">
@@ -96,7 +96,7 @@ function downloadLogs() {
         </div>
       </div>
 
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 flex-wrap">
         <!-- Search toggle -->
         <button
           @click="showSearch = !showSearch"
@@ -144,7 +144,7 @@ function downloadLogs() {
     <div
       ref="containerRef"
       @scroll="handleScroll"
-      class="flex-1 overflow-auto bg-[var(--color-bg-subtle)] rounded-lg border border-[var(--color-border)] p-4"
+      class="flex-1 overflow-auto bg-[var(--color-bg-subtle)] rounded-lg border border-[var(--color-border)] p-4 smooth-scroll"
     >
       <pre
         class="font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-[var(--color-text)]"

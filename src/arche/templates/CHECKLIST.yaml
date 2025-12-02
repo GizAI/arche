@@ -10,3 +10,4 @@ mobile: Mobile-friendly UX
 access: Access info complete (URL + credentials/signup)
 bug_free: No bugs found in testing
 clean: No dead/duplicate code
+security: No SQLi/XSS/CSRF, parameterized queries, output encoding, secure auth, security headers, input validation, no secrets in code

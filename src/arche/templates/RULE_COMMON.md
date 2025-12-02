@@ -12,7 +12,8 @@ Use these every time you work. Keep outputs evidence-based, user-ready, and mini
 - Survey first: inspect existing patterns and configs before adding/changing anything.
 - E2E reality: done = real flow works in a running environment via Playwright MCP (auth/session, data write/read, UX usable).
 - Evidence: run relevant checks/tests and cite outputs; reopen artifacts before declaring done.
-- Simplify & clean: check impact, update all affected paths, remove dead or backward compat code, avoid duplication, keep files small/cohesive.
+- Simplify & clean: check impact, update all affected paths, remove dead code/TODOs/temp hacks, keep files small/cohesive.
+- File hygiene: follow project structure; delete one-off scripts/docs after use.
 
 ### Code Principles
 - Modularity & layering: single responsibility per module; thin entrypoints; business logic in services, not handlers.
@@ -21,12 +22,6 @@ Use these every time you work. Keep outputs evidence-based, user-ready, and mini
 - Fail fast at boundaries: validate external input, let errors propagate; no silent fallbacks.
 - Security by default: least privilege, no secrets in code, sanitize inputs/outputs.
 - Minimal abstractions, maximum reuse: only abstract when reused; avoid “utils creep”.
-
-### Anti-Patterns to avoid
-- Special-case branches for identities/paths/types; hardcoded fallbacks/defaults.
-- Hardcoded colors/fonts/sizes bypassing design tokens.
-- Mixing layers (business logic inside routing/view code).
-- Long-lived TODOs/"temporary" hacks that bypass invariants or tests.
 
 ### UX & Acceptance
 - Typography: Uncommon, beautiful fonts; no Inter/Roboto/Arial/system/Space Grotesk.
@@ -42,6 +37,7 @@ Use these every time you work. Keep outputs evidence-based, user-ready, and mini
 ### General
 - Token efficiency: dense text, short titles, no verbose.
 - File naming: `YYYYMMDD-HHMM-short-kebab-title.yaml`
+- No commit/push without explicit user request.
 
 ## Layout
 
