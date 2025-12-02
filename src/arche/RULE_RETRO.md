@@ -13,7 +13,7 @@ Step back from daily execution. Reflect on the project holistically.
 
 ## Update PROJECT_RULES.md
 
-Add discovered rules:
+Add discovered rules (very concise, no duplication):
 - Coding conventions specific to this project
 - Architecture decisions (ADR style)
 - Learned patterns/anti-patterns
@@ -30,10 +30,6 @@ Add discovered rules:
 meta:
   timestamp: "ISO datetime"
   turns_reviewed: [1, 2, 3, ...]
-progress:
-  completed: ["task1", "task2"]
-  in_progress: ["task3"]
-  blocked: []
 insights:
   what_worked: ["..."]
   what_didnt: ["..."]

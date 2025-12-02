@@ -142,23 +142,32 @@ def parse_reviewer_json(output: str) -> dict | None:
 
 
 def build_system_prompt(arche_dir: Path, mode: str) -> str:
-    """Build system prompt from templates. mode: 'exec', 'review', 'retro'"""
+    """Build system prompt from templates. mode: 'plan', 'exec', 'review', 'retro'"""
     infinite = (arche_dir / INFINITE).exists()
     batch = (arche_dir / BATCH_MODE).exists()
     tools = list_tools(arche_dir)
+    now = datetime.now()
+    plan_mode = (mode == "plan")
+    project_rules = read_file(arche_dir / PROJECT_RULES) or ""
 
-    common = Template(read_file(arche_dir / RULE_COMMON) or read_file(PKG_DIR / RULE_COMMON)).render(tools=tools)
-    rule_map = {"exec": RULE_EXEC, "review": RULE_REVIEW, "retro": RULE_RETRO}
+    common = Template(read_file(arche_dir / RULE_COMMON) or read_file(PKG_DIR / RULE_COMMON)).render(
+        tools=tools, project_rules=project_rules
+    )
+    # plan mode uses RULE_REVIEW with plan_mode=True
+    rule_map = {"plan": RULE_REVIEW, "exec": RULE_EXEC, "review": RULE_REVIEW, "retro": RULE_RETRO}
     rule_name = rule_map.get(mode, RULE_EXEC)
     rule_content = read_file(arche_dir / rule_name) or read_file(PKG_DIR / rule_name)
 
-    return Template(rule_content).render(infinite=infinite, batch=batch, common=common)
+    prompt = Template(rule_content).render(infinite=infinite, batch=batch, common=common, plan_mode=plan_mode)
+    return f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n{prompt}"
 
 
 def build_user_prompt(turn: int, arche_dir: Path, goal: str | None, mode: str,
                       next_task: str | None, journal_file: str | None, resumed: bool) -> str:
-    """Build user prompt from template. mode: 'exec', 'review', 'retro'"""
+    """Build user prompt from template. mode: 'plan', 'exec', 'review', 'retro'"""
     tpl = Template(read_file(PKG_DIR / PROMPT) or "Turn {{ turn }}.")
+    if mode == "plan":
+        return f"Turn {turn}. Mode: PLAN.\nGoal: {goal}\n\nCreate a detailed plan for this goal. Do NOT execute - only plan and save to journal."
     if mode == "retro":
         return f"Turn {turn}. Mode: RETRO.\nGoal: {goal}\n\nConduct retrospective. Review all progress, update PROJECT_RULES.md."
     if mode == "review":
@@ -207,6 +216,7 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
     retro_config = state.get("retro_every", "auto")
     retro_every = int(retro_config) if str(retro_config).isdigit() else 0  # auto or off = 0 (plan-driven)
     turn = state.get("turn", 1)
+    plan_mode = state.get("plan_mode", False)  # True if started with --plan
     goal = goal or read_goal_from_plan(arche_dir)
     next_task, journal_file = None, None
 
@@ -231,23 +241,25 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
             mode, resumed = "review", True
         elif retro_every > 0 and turn > 1 and turn % retro_every == 0:
             mode = "retro"
+        elif turn == 1 and plan_mode:
+            mode = "plan"  # First turn is plan only if --plan was used
         else:
-            mode = "review" if turn % 2 == 0 else "exec"
+            # plan > exec > review > exec > review (if plan_mode)
+            # exec > review > exec > review (if no plan_mode)
+            if plan_mode:
+                mode = "review" if turn % 2 == 1 else "exec"  # turn 2=exec, 3=review, 4=exec
+            else:
+                mode = "review" if turn % 2 == 0 else "exec"  # turn 1=exec, 2=review, 3=exec
 
         # Build prompts
         system_prompt = build_system_prompt(arche_dir, mode)
         user_prompt = build_user_prompt(turn, arche_dir, goal, mode, next_task, journal_file, resumed)
 
-        # Create engine with appropriate permission_mode
-        # First exec (turn 1): plan mode with auto_approve to create and execute plan
-        # Subsequent turns: bypassPermissions for auto-execution
+        # Create engine with bypassPermissions for all modes
+        # Planning behavior is controlled via system prompt (RULE_PLAN.md)
         engine_kwargs = dict(base_engine_kwargs)
         if engine_type == "claude_sdk":
-            if turn == 1 and mode == "exec":
-                engine_kwargs["permission_mode"] = "plan"
-                engine_kwargs["auto_approve"] = True
-            else:
-                engine_kwargs["permission_mode"] = "bypassPermissions"
+            engine_kwargs["permission_mode"] = "bypassPermissions"
         engine = create_engine(engine_type, **engine_kwargs)
 
         try:
@@ -257,11 +269,13 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
 
                 output = ""
                 last_tool_ids = set()  # Track emitted tool IDs to avoid duplicates
+                last_was_tool = False  # Track if last output was a tool call
                 async for event in engine.run(goal=user_prompt, system_prompt=system_prompt):
                     if event.type == EventType.CONTENT and event.content:
                         output += event.content
                         f.write(event.content)
                         f.flush()
+                        last_was_tool = False
                     elif event.type == EventType.TOOL_CALL:
                         # Skip duplicate tool calls (streaming + AssistantMessage)
                         tool_id = event.metadata.get("tool_id") if event.metadata else None
@@ -270,11 +284,15 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
                         if tool_id:
                             last_tool_ids.add(tool_id)
                         args_str = _format_tool_args(event.tool_name, event.tool_args)
-                        f.write(f"\n[TOOL] {event.tool_name} {args_str}\n")
+                        # Add newline only if previous was text (not tool)
+                        prefix = "\n" if not last_was_tool else ""
+                        f.write(f"{prefix}[TOOL] {event.tool_name} {args_str}\n")
                         f.flush()
+                        last_was_tool = True
                     elif event.type == EventType.ERROR:
                         f.write(f"\n*** Error: {event.error} ***\n")
                         f.flush()
+                        last_was_tool = False
 
                 if mode in ("review", "retro"):
                     if resp := parse_reviewer_json(output):
@@ -331,7 +349,11 @@ def tail_log(arche_dir: Path):
     try:
         subprocess.run(["tail", "-f", "-n", "100", str(log_file)])
     except KeyboardInterrupt:
-        typer.echo("\nDetached. Arche continues in background. Run 'arche stop' to stop.", err=True)
+        running, _ = is_running(arche_dir)
+        if running:
+            typer.echo("\nDetached. Arche continues in background. Run 'arche stop' to stop.", err=True)
+        else:
+            typer.echo("\nArche has finished.", err=True)
 
 
 @app.command()
@@ -339,6 +361,7 @@ def start(
     goal: str = typer.Argument(..., help="Goal for Arche to achieve"),
     engine: str = typer.Option("claude_sdk", "-e", "--engine", help="Engine: claude_sdk, deepagents, codex"),
     model: str = typer.Option(None, "-m", "--model", help="Model to use"),
+    plan: bool = typer.Option(False, "-p", "--plan", help="Start with plan mode first"),
     infinite: bool = typer.Option(False, "-i", "--infinite", help="Run infinitely"),
     batch: bool = typer.Option(False, "-b", "--batch", help="Exec all tasks at once"),
     retro_every: str = typer.Option("auto", "-r", "--retro-every", help="Retro schedule: auto, N (every N turns), off"),
@@ -372,6 +395,7 @@ def start(
         "engine": {"type": engine, "kwargs": engine_kwargs},
         "retro_every": retro_every,
         "turn": 1,
+        "plan_mode": plan,  # True if --plan flag was used
     })
 
     (arche_dir / INFINITE).touch() if infinite else (arche_dir / INFINITE).unlink(missing_ok=True)

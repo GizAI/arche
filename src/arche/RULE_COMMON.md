@@ -9,16 +9,15 @@
 Directories inside `.arche/`:
 
 - `journal/` - per turn logs
-- `feedback/` - human input (`pending/`, `in_progress/`, `done/`)
+- `feedback/` - human input (`pending/`, `reviewed/`)
 - `plan/` - goals and tasks
 - `retrospective/` - periodic project retrospectives
 - `tools/` - reusable python tools
-
-## Project Rules
-
-Read `.arche/PROJECT_RULES.md` - project-specific coding, architecture, patterns, risks. Update when discovering new rules.
 {% if tools %}
 ## Tools
 Run: `python .arche/tools/<name>.py [args]`
 Available: {{ tools }}
 {% endif %}
+## Project Rules
+
+{{ project_rules }}
