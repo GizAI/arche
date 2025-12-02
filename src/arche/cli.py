@@ -25,6 +25,7 @@ app = typer.Typer(
 # File names
 LOG, PID, RULE_EXEC, RULE_REVIEW, RULE_COMMON, PROMPT = "arche.log", "arche.pid", "RULE_EXEC.md", "RULE_REVIEW.md", "RULE_COMMON.md", "PROMPT.md"
 INFINITE, FORCE_REVIEW, CLAUDE_ARGS, BATCH_MODE = "infinite", "force_review", "claude_args.json", "batch"
+GOAL_FILE, TURN_FILE = "goal.txt", "turn.txt"
 PKG_DIR = Path(__file__).parent
 
 
@@ -92,12 +93,25 @@ def read_latest_journal(arche_dir: Path, journal_path: str | None = None) -> str
 
 def parse_reviewer_json(output: str) -> dict | None:
     """Parse JSON from reviewer output."""
-    for pattern in [r'```json\s*(\{.*?\})\s*```', r'(\{\s*"(?:status|next_task)".*?\})']:
-        if m := re.search(pattern, output, re.DOTALL):
-            try:
-                return json.loads(m.group(1))
-            except json.JSONDecodeError:
-                pass
+    # Try code block first
+    if m := re.search(r'```json\s*(\{.*?\})\s*```', output, re.DOTALL):
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+    # Find JSON by matching braces
+    for start in [m.start() for m in re.finditer(r'\{\s*"(?:status|next_task)', output)]:
+        depth, end = 0, start
+        for i, c in enumerate(output[start:], start):
+            if c == '{': depth += 1
+            elif c == '}': depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+        try:
+            return json.loads(output[start:end])
+        except json.JSONDecodeError:
+            continue
     return None
 
 
@@ -133,10 +147,18 @@ def build_cmd(turn: int, arche_dir: Path, goal: str | None, extra_args: list[str
 
 def run_loop(arche_dir: Path, goal: str | None = None, extra_args: list[str] | None = None):
     """Main exec/review loop."""
-    log_file, infinite, turn = arche_dir / LOG, (arche_dir / INFINITE).exists(), 1
+    project_root = arche_dir.parent
+    log_file, infinite = arche_dir / LOG, (arche_dir / INFINITE).exists()
+    # Restore turn from file or start at 1
+    turn = int(read_file(arche_dir / TURN_FILE) or "1")
+    # Restore goal from file if not provided
+    goal = goal or read_file(arche_dir / GOAL_FILE) or None
     next_task, journal_file = None, None
 
     while True:
+        # Save current turn
+        (arche_dir / TURN_FILE).write_text(str(turn))
+
         # Check forced review
         force_file = arche_dir / FORCE_REVIEW
         if force_file.exists():
@@ -145,7 +167,7 @@ def run_loop(arche_dir: Path, goal: str | None = None, extra_args: list[str] | N
         else:
             review_mode, resumed = (turn % 2 == 0), False
 
-        cmd = build_cmd(turn, arche_dir, goal if turn == 1 else None, extra_args,
+        cmd = build_cmd(turn, arche_dir, goal, extra_args,
                        review_mode, next_task, journal_file, resumed)
 
         try:
@@ -153,7 +175,7 @@ def run_loop(arche_dir: Path, goal: str | None = None, extra_args: list[str] | N
                 f.write(f"\n{'='*50}\nTurn {turn} ({'REVIEW' if review_mode else 'EXEC'}) - {datetime.now().isoformat()}\n{'='*50}\n")
                 f.flush()
 
-                proc = subprocess.Popen(cmd, cwd=str(arche_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                proc = subprocess.Popen(cmd, cwd=str(project_root), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 output = ""
                 while chunk := proc.stdout.read(1):
                     output += (d := chunk.decode('utf-8', errors='replace'))
@@ -247,11 +269,15 @@ def start(
             time.sleep(1)
 
     arche_dir.mkdir(exist_ok=True)
+    (arche_dir / "journal").mkdir(exist_ok=True)
+    (arche_dir / "plan").mkdir(exist_ok=True)
     for rf in [RULE_EXEC, RULE_REVIEW, RULE_COMMON]:
         dest = arche_dir / rf
         if not dest.exists() or force:
             dest.write_text(read_file(PKG_DIR / rf))
 
+    (arche_dir / GOAL_FILE).write_text(goal)
+    (arche_dir / TURN_FILE).write_text("1")
     (arche_dir / INFINITE).touch() if infinite else (arche_dir / INFINITE).unlink(missing_ok=True)
     (arche_dir / BATCH_MODE).touch() if batch else (arche_dir / BATCH_MODE).unlink(missing_ok=True)
     (arche_dir / CLAUDE_ARGS).write_text(json.dumps(extra_args)) if extra_args else (arche_dir / CLAUDE_ARGS).unlink(missing_ok=True)
@@ -362,8 +388,12 @@ def feedback(
         if running:
             typer.echo(f"Interrupting PID {pid}...")
             kill_arche(pid)
-        else:
-            typer.echo("Not running. Use 'arche resume'.")
+            time.sleep(1)
+        extra_args = json.loads(read_file(arche_dir / CLAUDE_ARGS) or "[]")
+        typer.echo("Starting review...")
+        start_daemon(arche_dir, None, extra_args)
+        time.sleep(0.5)
+        tail_log(arche_dir)
 
 
 @app.command()

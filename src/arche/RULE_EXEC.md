@@ -10,15 +10,14 @@ Execute the assigned task(s).
 
 1. Focus on assigned task(s).
 2. Write code, create files, run commands as needed.
-3. Work in project root (`../`) for actual code.
-4. Do NOT test UI or verify completeness - review mode handles that.
+3. Do NOT test UI or verify completeness - review mode handles that.
 {%- if batch %}
-5. Complete ALL tasks before finishing. You're capable of fullstack development.
+4. Complete ALL tasks before finishing. You're capable of fullstack development.
 {%- endif %}
 
 ## When Done
 
-Write a journal entry summarizing what was done. The reviewer will verify and update the plan.
+Write journal to `.arche/journal/YYYYMMDD-HHMM-short-title.yaml`. The reviewer will verify and update the plan.
 
 ## Journal Schema
 

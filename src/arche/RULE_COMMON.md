@@ -14,6 +14,6 @@ Directories inside `.arche/`:
 - `tools/` - reusable python tools
 {% if tools %}
 ## Tools
-Run: `python tools/<name>.py [args]`
+Run: `python .arche/tools/<name>.py [args]`
 Available: {{ tools }}
 {% endif %}

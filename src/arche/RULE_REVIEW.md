@@ -11,7 +11,7 @@ Review the previous execution. Test thoroughly. Update plan with issues found.
    - Test all features, edge cases, error handling
    - Verify requirements are actually met
 3. **Be critical** - assume something is wrong until proven otherwise.
-4. Process any pending feedback (`feedback/pending/` → `in_progress/` → `done/`).
+4. Process any pending feedback (`.arche/feedback/pending/` → `in_progress/` → `done/`).
 
 ## Testing with Playwright
 
@@ -24,7 +24,7 @@ When testing web UI:
 
 ## Tool Creation
 
-Create reusable tools in `tools/` when:
+Create reusable tools in `.arche/tools/` when:
 - Task repeats or is error-prone for LLM
 - NOT for one-time use (no throwaway scripts)
 - Filename must be self-descriptive (e.g., `migrate-db-schema.py`, `sync-translations.py`)
@@ -34,7 +34,8 @@ Guide executor on tool usage in `next_task` field.
 ## After Review
 
 1. Write review journal with findings.
-2. Update `plan/*.yaml`:
+2. Update `.arche/plan/*.yaml`:
+   - If no plan exists, create one with goal and task breakdown
    - Mark verified tasks as `done`
    - Add rework items if issues found (state: `todo`)
 3. Move processed feedback to `done/`.
@@ -52,7 +53,7 @@ After review, output JSON to control the next turn:
   "status": "continue",
 {%- endif %}
   "next_task": "Complete description of ALL remaining tasks to do",
-  "journal_file": "journal/YYYYMMDD-HHMM-xxx.yaml"
+  "journal_file": ".arche/journal/YYYYMMDD-HHMM-xxx.yaml"
 }
 ```
 {%- else %}
@@ -66,7 +67,7 @@ The executor is a fullstack AI.
   "status": "continue",
 {%- endif %}
   "next_task": "Task(s) description - can be multiple if they're related",
-  "journal_file": "journal/YYYYMMDD-HHMM-xxx.yaml"
+  "journal_file": ".arche/journal/YYYYMMDD-HHMM-xxx.yaml"
 }
 ```
 {%- endif %}
