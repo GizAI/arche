@@ -23,7 +23,7 @@ app = typer.Typer(name="arche", help="Long-lived coding agent.", no_args_is_help
 
 # Constants
 LOG, PID, SERVER_PID, STATE = "arche.log", "arche.pid", "server.pid", "state.json"
-TEMPLATES = ["RULE_EXEC.md", "RULE_REVIEW.md", "RULE_RETRO.md", "RULE_COMMON.md", "RULE_PROJECT.md", "PROMPT.md", "CHECKLIST.yaml"]
+TEMPLATES = ["RULE_EXEC.md", "RULE_REVIEW.md", "RULE_RETRO.md", "RULE_COMMON.md", "PROMPT.md", "CHECKLIST.yaml"]
 INFINITE, FORCE_REVIEW, FORCE_RETRO, STEP_MODE = "infinite", "force_review", "force_retro", "step"
 PKG_DIR = Path(__file__).parent
 TPL_DIR = PKG_DIR / "templates"
@@ -47,6 +47,15 @@ def get_template(arche_dir: Path | None, name: str) -> str:
     if arche_dir and (arche_dir / "templates" / name).exists():
         return (arche_dir / "templates" / name).read_text()
     return (TPL_DIR / name).read_text()
+
+
+def get_project_rules(arche_dir: Path | None) -> str:
+    """Get project rules from ARCHE.md at project root."""
+    if arche_dir:
+        arche_md = arche_dir.parent / "ARCHE.md"
+        if arche_md.exists():
+            return arche_md.read_text()
+    return (TPL_DIR / "ARCHE.md").read_text()
 
 
 def read_state(arche_dir: Path) -> dict:
@@ -129,10 +138,10 @@ def init_arche_dir(arche_dir: Path):
     arche_dir.mkdir(exist_ok=True)
     for d in DIRS:
         (arche_dir / d).mkdir(exist_ok=True)
-    # Copy RULE_PROJECT.md by default (can be customized)
-    rules_file = arche_dir / "templates" / "RULE_PROJECT.md"
-    if not rules_file.exists():
-        rules_file.write_text((TPL_DIR / "RULE_PROJECT.md").read_text())
+    # Copy ARCHE.md to project root by default (can be customized)
+    arche_md = arche_dir.parent / "ARCHE.md"
+    if not arche_md.exists():
+        arche_md.write_text((TPL_DIR / "ARCHE.md").read_text())
 
 
 def reset_arche_dir(arche_dir: Path):
@@ -260,7 +269,7 @@ def build_system_prompt(arche_dir: Path, mode: str) -> str:
     checklist = load_checklist(arche_dir)
 
     common = Template(get_template(arche_dir, "RULE_COMMON.md")).render(
-        tools=list_tools(arche_dir), project_rules=get_template(arche_dir, "RULE_PROJECT.md")
+        tools=list_tools(arche_dir), project_rules=get_project_rules(arche_dir)
     )
     rule_map = {"plan": "RULE_REVIEW.md", "exec": "RULE_EXEC.md", "review": "RULE_REVIEW.md", "retro": "RULE_RETRO.md"}
     rule = get_template(arche_dir, rule_map.get(mode, "RULE_EXEC.md"))

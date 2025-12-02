@@ -12,11 +12,11 @@ Review the previous execution. Test thoroughly. Update plan with issues found.
 
 1. Analyze the goal thoroughly - understand requirements.
 2. Explore codebase - identify relevant files, patterns, dependencies.
-3. **Define project standards** in `.arche/templates/RULE_PROJECT.md` (see below).
+3. **Define project standards** in `ARCHE.md` at project root (see below).
 4. Create detailed plan in `.arche/plan/`.
 5. Break down into concrete, actionable tasks.
 
-## Define Standards (RULE_PROJECT.md)
+## Define Standards (ARCHE.md)
 
 Analyze existing codebase first. Document discovered patterns or define new concisely:
 
@@ -67,7 +67,7 @@ Guide executor on tool usage in `next_task` field.
    - Archive old plan files to `.arche/plan/archive/`.
    - Schedule `retro` tasks at appropriate milestones (e.g., after major features).
 {%- endif %}
-3. Update `.arche/templates/RULE_PROJECT.md` if discovered patterns (very concise, no duplication).
+3. Update `ARCHE.md` if discovered patterns (very concise, no duplication).
 
 ## Response Format
 

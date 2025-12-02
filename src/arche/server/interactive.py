@@ -833,57 +833,141 @@ def list_existing_sessions(cwd: Path | None = None, limit: int = 50) -> list[Exi
 
 # === Model Discovery ===
 
-# Known Claude models with their details
-CLAUDE_MODELS = [
-    {
-        "id": "claude-sonnet-4-20250514",
-        "name": "Claude Sonnet 4",
-        "description": "Latest Sonnet model - fast and capable",
-        "context_window": 200000,
-        "recommended": True,
-    },
-    {
-        "id": "claude-opus-4-20250514",
-        "name": "Claude Opus 4",
-        "description": "Most capable model - best for complex tasks",
-        "context_window": 200000,
-        "recommended": False,
-    },
-    {
-        "id": "claude-3-7-sonnet-20250219",
-        "name": "Claude 3.7 Sonnet",
-        "description": "Extended thinking model",
-        "context_window": 200000,
-        "recommended": False,
-    },
-    {
-        "id": "claude-3-5-sonnet-20241022",
-        "name": "Claude 3.5 Sonnet",
-        "description": "Previous generation Sonnet",
-        "context_window": 200000,
-        "recommended": False,
-    },
-    {
-        "id": "claude-3-5-haiku-20241022",
-        "name": "Claude 3.5 Haiku",
-        "description": "Fastest model - good for simple tasks",
-        "context_window": 200000,
-        "recommended": False,
-    },
-]
+import logging
+import requests
+from functools import lru_cache
+from typing import TypedDict
+
+logger = logging.getLogger(__name__)
 
 
-def get_available_models() -> list[dict]:
+class ModelInfo(TypedDict):
+    """Model information from API."""
+    id: str
+    name: str
+    display_name: str
+    created_at: str
+
+
+# Cache for models (TTL managed by caller)
+_models_cache: list[ModelInfo] | None = None
+_models_cache_time: float = 0
+_CACHE_TTL = 300  # 5 minutes
+
+
+def get_claude_credentials() -> dict | None:
+    """Load Claude CLI OAuth credentials."""
+    creds_path = Path.home() / ".claude" / ".credentials.json"
+    if not creds_path.exists():
+        return None
+    try:
+        with open(creds_path) as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load credentials: {e}")
+        return None
+
+
+def fetch_models_from_api() -> list[ModelInfo]:
+    """Fetch available models from Anthropic API using OAuth token.
+
+    Uses the oauth-2025-04-20 beta flag to authenticate with OAuth token.
+    See docs/anthropic-oauth-api.md for details.
+    """
+    creds = get_claude_credentials()
+    if not creds:
+        logger.warning("No Claude credentials found")
+        return []
+
+    token = creds.get("claudeAiOauth", {}).get("accessToken")
+    if not token:
+        logger.warning("No access token in credentials")
+        return []
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "oauth-2025-04-20",
+        "anthropic-dangerous-direct-browser-access": "true",
+    }
+
+    try:
+        response = requests.get(
+            "https://api.anthropic.com/v1/models",
+            headers=headers,
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        models = []
+        for item in data.get("data", []):
+            models.append({
+                "id": item.get("id", ""),
+                "name": item.get("id", ""),  # Use ID as name
+                "display_name": item.get("display_name", item.get("id", "")),
+                "created_at": item.get("created_at", ""),
+            })
+
+        logger.info(f"Fetched {len(models)} models from API")
+        return models
+
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"Failed to fetch models from API: {e}")
+        return []
+    except Exception as e:
+        logger.warning(f"Error parsing models response: {e}")
+        return []
+
+
+def get_available_models(force_refresh: bool = False) -> list[dict]:
     """Get list of available Claude models.
 
-    Returns models that are known to work with Claude Code.
+    Fetches from API with caching. Falls back to known models if API fails.
+
+    Args:
+        force_refresh: Force refresh from API ignoring cache
     """
-    return CLAUDE_MODELS
+    import time
+    global _models_cache, _models_cache_time
+
+    # Check cache
+    now = time.time()
+    if not force_refresh and _models_cache and (now - _models_cache_time) < _CACHE_TTL:
+        return _models_cache
+
+    # Fetch from API
+    models = fetch_models_from_api()
+
+    if models:
+        # Sort: newest first (by created_at), then by name
+        models.sort(key=lambda m: (m.get("created_at", ""), m.get("id", "")), reverse=True)
+
+        # Add recommended flag (latest sonnet)
+        for model in models:
+            model["recommended"] = "sonnet-4-5" in model["id"]
+
+        _models_cache = models
+        _models_cache_time = now
+        return models
+
+    # Fallback to cached if API fails
+    if _models_cache:
+        return _models_cache
+
+    # Ultimate fallback: hardcoded models
+    logger.warning("Using fallback hardcoded models")
+    return [
+        {"id": "claude-sonnet-4-5-20250929", "name": "claude-sonnet-4-5-20250929", "display_name": "Claude Sonnet 4.5", "recommended": True},
+        {"id": "claude-opus-4-5-20251101", "name": "claude-opus-4-5-20251101", "display_name": "Claude Opus 4.5", "recommended": False},
+        {"id": "claude-haiku-4-5-20251001", "name": "claude-haiku-4-5-20251001", "display_name": "Claude Haiku 4.5", "recommended": False},
+    ]
 
 
 def get_default_model() -> str:
     """Get the default model ID."""
-    for model in CLAUDE_MODELS:
+    models = get_available_models()
+    for model in models:
         if model.get("recommended"):
             return model["id"]
-    return CLAUDE_MODELS[0]["id"] if CLAUDE_MODELS else "claude-sonnet-4-20250514"
+    return models[0]["id"] if models else "claude-sonnet-4-5-20250929"

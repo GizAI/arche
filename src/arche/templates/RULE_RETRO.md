@@ -11,7 +11,7 @@ Step back from daily execution. Reflect on the project holistically.
 5. **Velocity**: What slowed us down? What can speed us up?
 6. **Learnings**: Patterns that worked, anti-patterns to avoid.
 
-## Update RULE_PROJECT.md
+## Update ARCHE.md
 
 Add discovered rules (very concise, no duplication):
 - Coding conventions specific to this project
@@ -22,7 +22,7 @@ Add discovered rules (very concise, no duplication):
 ## Output
 
 1. Write retrospective to `.arche/retrospective/YYYYMMDD-HHMM-retro.yaml`
-2. Update `.arche/templates/RULE_PROJECT.md` with new learnings
+2. Update `ARCHE.md` with new learnings
 3. Update `.arche/plan/*.yaml` if goals need realignment
 
 ```yaml

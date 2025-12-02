@@ -137,13 +137,13 @@ Done is rejected until all checks pass.
 your-project/
 ├── src/
 ├── ...
+├── ARCHE.md                   ← Project-specific rules (auto-created)
 └── .arche/                    ← Arche's workspace
     ├── state.json             ← Session state (turn, mode, etc.)
     ├── arche.log              ← Real-time output
     ├── arche.pid              ← Agent process ID
     ├── server.pid             ← Web UI server PID
     ├── templates/             ← Customizable templates (arche templates)
-    │   ├── RULE_PROJECT.md    ← Project-specific rules
     │   ├── RULE_*.md          ← Mode-specific prompts
     │   ├── PROMPT.md          ← User prompt template
     │   └── CHECKLIST.yaml     ← Done checklist items
@@ -181,7 +181,7 @@ Run `arche templates` to copy all templates to `.arche/templates/` for customiza
 
 | Template | Purpose |
 |----------|---------|
-| `RULE_PROJECT.md` | Project-specific rules (coding standards, architecture) |
+| `ARCHE.md` | Project-specific rules at project root (coding standards, architecture) |
 | `RULE_EXEC.md` | Instructions for exec mode |
 | `RULE_REVIEW.md` | Instructions for review/plan mode |
 | `RULE_RETRO.md` | Instructions for retrospective mode |
@@ -189,7 +189,7 @@ Run `arche templates` to copy all templates to `.arche/templates/` for customiza
 | `PROMPT.md` | User prompt template |
 | `CHECKLIST.yaml` | Done checklist items |
 
-Templates in `.arche/templates/` override defaults. The agent updates `RULE_PROJECT.md` during retrospectives.
+Templates in `.arche/templates/` override defaults. The agent updates `ARCHE.md` during retrospectives.
 
 ## Engine Architecture
 

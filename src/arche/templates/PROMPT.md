@@ -10,7 +10,7 @@ Turn {{ turn }}. Mode: {{ mode | upper }}.
 Create a detailed plan. Do NOT execute.
 {% elif mode == "retro" %}
 
-Conduct retrospective. Update RULE_PROJECT.md.
+Conduct retrospective. Update ARCHE.md.
 {% elif mode == "review" %}
 
 ## Previous Journal
