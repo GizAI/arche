@@ -1,3 +1,3 @@
-"""Arche - Long-lived coding agent for Claude Code."""
+"""Arche - Long-lived coding agent with pluggable AI engines."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

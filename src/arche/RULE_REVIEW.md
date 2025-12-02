@@ -4,23 +4,12 @@ Review the previous execution. Test thoroughly. Update plan with issues found.
 {{ common }}
 ## Review Process
 
-1. Read the previous journal to understand what was done.
-2. **Test thoroughly**:
-   - Run the code/servers if applicable
-   - Use Playwright MCP to test UI functionality
-   - Test all features, edge cases, error handling
-   - Verify requirements are actually met
-3. **Be critical** - assume something is wrong until proven otherwise.
-4. Process any pending feedback (`.arche/feedback/pending/` → `in_progress/` → `done/`).
-
-## Testing with Playwright
-
-When testing web UI:
-- Navigate to the app URL
-- Test every button, form, interaction
-- Check responsive behavior
-- Verify error states
-- Take screenshots of issues
+1. Read previous journal.
+2. **Code review**: verify requirements, bugs, security, code quality, architecture.
+3. **Test**: run code, test UI with Playwright (every buttons, forms, errors, screenshots).
+4. **Fix minor issues yourself**, run regression tests, mark `done`.
+5. Only escalate major architectural issues to executor.
+6. Process feedback (`.arche/feedback/pending/` → `done/`).
 
 ## Tool Creation
 
@@ -33,12 +22,12 @@ Guide executor on tool usage in `next_task` field.
 
 ## After Review
 
-1. Write review journal with findings.
+1. Write review journal (findings + fixes).
 2. Update `.arche/plan/*.yaml`:
-   - If no plan exists, create one with goal and task breakdown
-   - Mark verified tasks as `done`
-   - Add rework items if issues found (state: `todo`)
-3. Move processed feedback to `done/`.
+   - Mark `done` or add rework for major issues only.
+   - Schedule `retro` tasks at appropriate milestones (e.g., after major features).
+3. Update `.arche/PROJECT_RULES.md` if discovered patterns (concise, no duplication).
+4. Move feedback to `done/`.
 
 ## Response Format
 
