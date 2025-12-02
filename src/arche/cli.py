@@ -25,6 +25,7 @@ app = typer.Typer(name="arche", help="Long-lived coding agent.", no_args_is_help
 # Constants
 LOG, PID, STATE, PROJECT_RULES = "arche.log", "arche.pid", "state.json", "PROJECT_RULES.md"
 RULE_EXEC, RULE_REVIEW, RULE_RETRO, RULE_COMMON = "RULE_EXEC.md", "RULE_REVIEW.md", "RULE_RETRO.md", "RULE_COMMON.md"
+PROMPT = "PROMPT.md"
 INFINITE, FORCE_REVIEW, FORCE_RETRO, STEP_MODE = "infinite", "force_review", "force_retro", "step"
 PKG_DIR = Path(__file__).parent
 DIRS = ["journal", "plan", "feedback", "feedback/archive", "retrospective", "tools"]
@@ -184,6 +185,32 @@ def read_goal_from_plan(arche_dir: Path) -> str | None:
     return None
 
 
+def read_feedback(arche_dir: Path) -> str:
+    """Read all pending feedback files."""
+    feedback_dir = arche_dir / "feedback"
+    if not feedback_dir.exists():
+        return ""
+    files = sorted(f for f in feedback_dir.glob("*.yaml") if f.is_file())
+    if not files:
+        return ""
+    parts = []
+    for f in files:
+        parts.append(f"### {f.name}\n{f.read_text()}")
+    return "\n\n".join(parts)
+
+
+def archive_feedback(arche_dir: Path):
+    """Move all feedback files to archive."""
+    feedback_dir = arche_dir / "feedback"
+    archive_dir = feedback_dir / "archive"
+    if not feedback_dir.exists():
+        return
+    archive_dir.mkdir(exist_ok=True)
+    for f in feedback_dir.glob("*.yaml"):
+        if f.is_file():
+            f.rename(archive_dir / f.name)
+
+
 def build_system_prompt(arche_dir: Path, mode: str) -> str:
     infinite = (arche_dir / INFINITE).exists()
     step = (arche_dir / STEP_MODE).exists()
@@ -192,21 +219,24 @@ def build_system_prompt(arche_dir: Path, mode: str) -> str:
     common = Template(read_file(arche_dir / RULE_COMMON) or read_file(PKG_DIR / RULE_COMMON)).render(
         tools=list_tools(arche_dir), project_rules=read_file(arche_dir / PROJECT_RULES)
     )
-    rule_map = {"plan": RULE_REVIEW, "exec": RULE_EXEC, "review": RULE_REVIEW, "retro": RULE_RETRO}
-    rule = read_file(arche_dir / rule_map.get(mode, RULE_EXEC)) or read_file(PKG_DIR / rule_map.get(mode, RULE_EXEC))
+    rule_file = {"plan": RULE_REVIEW, "exec": RULE_EXEC, "review": RULE_REVIEW, "retro": RULE_RETRO}.get(mode, RULE_EXEC)
+    rule = read_file(arche_dir / rule_file) or read_file(PKG_DIR / rule_file)
     prompt = Template(rule).render(infinite=infinite, step=step, common=common, plan_mode=plan_mode)
     return f"Current time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n{prompt}"
 
 
 def build_user_prompt(turn: int, arche_dir: Path, goal: str | None, mode: str,
                       next_task: str | None, journal_file: str | None) -> str:
-    if mode == "plan":
-        return f"Turn {turn}. Mode: PLAN.\nGoal: {goal}\n\nCreate a detailed plan. Do NOT execute."
-    if mode == "retro":
-        return f"Turn {turn}. Mode: RETRO.\nGoal: {goal}\n\nConduct retrospective. Update PROJECT_RULES.md."
-    if mode == "review":
-        return f"Turn {turn}. Mode: REVIEW.\nGoal: {goal}\n\n## Previous Journal\n{read_latest_journal(arche_dir)}"
-    return f"Turn {turn}. Mode: EXEC.\nGoal: {goal}\n\n## Task\n{next_task or goal or 'Continue with the plan'}\n\n## Context\n{read_latest_journal(arche_dir, journal_file)}"
+    template = Template(read_file(arche_dir / PROMPT) or read_file(PKG_DIR / PROMPT))
+    return template.render(
+        turn=turn,
+        mode=mode,
+        goal=goal,
+        feedback=read_feedback(arche_dir),
+        prev_journal=read_latest_journal(arche_dir),
+        next_task=next_task,
+        context_journal=read_latest_journal(arche_dir, journal_file),
+    )
 
 
 def parse_response_json(output: str) -> dict | None:
@@ -257,6 +287,7 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
     retro_every = int(retro_cfg) if str(retro_cfg).isdigit() else 0
     turn = state.get("turn", 1)
     plan_mode = state.get("plan_mode", False)
+    last_mode = state.get("last_mode")  # Track previous mode
     goal = goal or state.get("goal") or read_goal_from_plan(arche_dir)
     next_task, journal_file = state.get("next_task"), state.get("journal_file")
 
@@ -270,21 +301,26 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
         state["turn"] = turn
         write_state(arche_dir, state)
 
-        # Determine mode
+        # Determine natural mode based on previous mode (not turn number)
+        if turn == 1:
+            natural_mode = "plan" if plan_mode else "exec"
+        elif retro_every > 0 and turn % retro_every == 0:
+            natural_mode = "retro"
+        elif last_mode == "exec":
+            natural_mode = "review"
+        else:
+            # After review/retro/plan, or if unknown → exec
+            natural_mode = "exec"
+
+        # Check for forced mode override
         if (arche_dir / FORCE_RETRO).exists():
             (arche_dir / FORCE_RETRO).unlink()
             mode = "retro"
         elif (arche_dir / FORCE_REVIEW).exists():
             (arche_dir / FORCE_REVIEW).unlink()
             mode = "review"
-        elif retro_every > 0 and turn > 1 and turn % retro_every == 0:
-            mode = "retro"
-        elif turn == 1 and plan_mode:
-            mode = "plan"
-        elif plan_mode:
-            mode = "review" if turn % 2 == 1 else "exec"
         else:
-            mode = "review" if turn % 2 == 0 else "exec"
+            mode = natural_mode
 
         system_prompt = build_system_prompt(arche_dir, mode)
         user_prompt = build_user_prompt(turn, arche_dir, goal, mode, next_task, journal_file)
@@ -324,14 +360,18 @@ async def run_loop(arche_dir: Path, goal: str | None = None):
                             f.write("\n*** Done ***\n")
                             break
                         next_task, journal_file = resp.get("next_task"), resp.get("journal_file")
-                        state.update(next_task=next_task, journal_file=journal_file)
-                        write_state(arche_dir, state)
                     else:
                         f.write(f"\n*** Warning: No {mode} JSON ***\n")
                         next_task, journal_file = None, None
+                    # Archive feedback after review/retro/plan completes
+                    archive_feedback(arche_dir)
                 else:
-                    state.update(next_task=None, journal_file=None)
-                    write_state(arche_dir, state)
+                    next_task, journal_file = None, None
+
+                # Save state at end of turn (single write)
+                last_mode = mode
+                state.update(next_task=next_task, journal_file=journal_file, last_mode=last_mode)
+                write_state(arche_dir, state)
 
                 turn += 1
                 await asyncio.sleep(1)
@@ -422,7 +462,8 @@ def resume(
         typer.echo(f"Already running (PID {pid}).")
         return tail_log(arche_dir)
 
-    turn = read_state(arche_dir).get("turn", 1)
+    state = read_state(arche_dir)
+    turn = state.get("turn", 1)
 
     if feedback_msg:
         msg = " ".join(feedback_msg)
@@ -431,12 +472,26 @@ def resume(
         review = True  # Auto-enable review mode when feedback provided
 
     mode_str = ""
-    if retro:
-        (arche_dir / FORCE_RETRO).touch()
-        mode_str = " (retro)"
-    elif review:
-        (arche_dir / FORCE_REVIEW).touch()
-        mode_str = " (review)"
+    if retro or review:
+        last_mode = state.get("last_mode")
+
+        # Calculate natural mode based on previous mode (not turn number)
+        if turn == 1:
+            natural = "plan" if state.get("plan_mode") else "exec"
+        elif last_mode == "exec":
+            natural = "review"
+        else:
+            natural = "exec"
+
+        forced = "retro" if retro else "review"
+
+        # Only set forced mode if it differs from natural mode
+        if forced != natural:
+            turn += 1
+            state["turn"] = turn
+            write_state(arche_dir, state)
+            (arche_dir / FORCE_RETRO if retro else FORCE_REVIEW).touch()
+            mode_str = f" ({forced})"
 
     with open(arche_dir / LOG, "a") as f:
         f.write(f"\n{'='*50}\nResumed: {datetime.now().isoformat()} (turn {turn}){mode_str}\n{'='*50}\n")

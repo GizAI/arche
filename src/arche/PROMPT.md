@@ -1,15 +1,26 @@
-Turn {{ turn }}. Mode: {{ "REVIEW" if review_mode else "EXEC" }}.
+Turn {{ turn }}. Mode: {{ mode | upper }}.
 {% if goal %}Goal: {{ goal }}{% endif %}
-{% if review_mode %}
-{% if resumed %}
-**Resumed.** Check current state from journal/plan before continuing.
+{% if feedback %}
+
+## User Feedback (address these first)
+{{ feedback }}
 {% endif %}
-## Previous Execution Journal
+{% if mode == "plan" %}
+
+Create a detailed plan. Do NOT execute.
+{% elif mode == "retro" %}
+
+Conduct retrospective. Update PROJECT_RULES.md.
+{% elif mode == "review" %}
+
+## Previous Journal
 {{ prev_journal }}
 {% else %}
+
 ## Task
-{{ next_task }}
+{{ next_task or goal or "Continue with the plan" }}
 {% if context_journal %}
+
 ## Context
 {{ context_journal }}
 {% endif %}
