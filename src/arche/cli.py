@@ -27,7 +27,7 @@ TEMPLATES = ["RULE_EXEC.md", "RULE_REVIEW.md", "RULE_RETRO.md", "RULE_COMMON.md"
 INFINITE, FORCE_REVIEW, FORCE_RETRO, STEP_MODE = "infinite", "force_review", "force_retro", "step"
 PKG_DIR = Path(__file__).parent
 TPL_DIR = PKG_DIR / "templates"
-DIRS = ["journal", "plan", "feedback", "feedback/archive", "retrospective", "tools", "templates"]
+DIRS = ["journal", "plan", "plan/archive", "feedback", "feedback/archive", "retrospective", "tools", "templates"]
 
 # Tool arg display keys
 TOOL_ARG_KEYS = {

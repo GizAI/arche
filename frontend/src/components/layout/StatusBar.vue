@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { useAgentStore } from '@/stores/agent'
+import { useTheme } from '@/composables/useTheme'
 import { storeToRefs } from 'pinia'
 import { computed } from 'vue'
 
 const store = useAgentStore()
 const { status, wsConnected } = storeToRefs(store)
+const { theme, toggleTheme } = useTheme()
 
 const statusColor = computed(() => {
   if (!status.value) return 'var(--color-text-subtle)'
@@ -54,6 +56,17 @@ const statusText = computed(() => {
     <div class="flex items-center gap-3 text-xs font-mono">
       <span v-if="status?.infinite" class="text-[var(--color-warning)]">∞</span>
       <span v-if="status?.step" class="text-[var(--color-info)]">STEP</span>
+
+      <!-- Theme toggle -->
+      <button
+        @click="toggleTheme"
+        class="px-2 py-1 rounded hover:bg-[var(--color-bg-elevated)] transition-colors"
+        :title="`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`"
+      >
+        <span v-if="theme === 'dark'">☀️</span>
+        <span v-else>🌙</span>
+      </button>
+
       <div class="flex items-center gap-1">
         <span
           class="w-1.5 h-1.5 rounded-full"

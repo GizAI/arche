@@ -63,6 +63,8 @@ Guide executor on tool usage in `next_task` field.
    - Set first task(s) to `doing`.
 {%- else %}
    - Mark `done` or add rework for major issues only.
+   - Remove old done tasks (keep recent 5 max).
+   - Archive old plan files to `.arche/plan/archive/`.
    - Schedule `retro` tasks at appropriate milestones (e.g., after major features).
 {%- endif %}
 3. Update `.arche/templates/RULE_PROJECT.md` if discovered patterns (very concise, no duplication).

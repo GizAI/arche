@@ -1,7 +1,18 @@
 @import "tailwindcss";
 
-/* Terminal aesthetic - dark theme with warm neutrals */
+/* Font imports - Uncommon beautiful fonts */
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&display=swap');
+@import url('https://cdn.jsdelivr.net/npm/commit-mono@1.0.0/font.css');
+
+/* Terminal aesthetic - dark + light themes with warm neutrals */
 @theme {
+  /* Font family - Uncommon beautiful fonts */
+  --font-mono: 'Commit Mono', 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+  --font-sans: 'Geist', 'DM Sans', -apple-system, sans-serif;
+}
+
+/* Dark theme (default) */
+:root, :root[data-theme="dark"] {
   /* Stone/zinc base - warm neutrals */
   --color-bg: #0d0d0d;
   --color-bg-subtle: #141414;
@@ -28,9 +39,48 @@
   --color-border: #2e2e2e;
   --color-border-muted: #1f1f1f;
 
-  /* Font family */
-  --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
-  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  /* Background gradients for dark mode */
+  --gradient-bg-1: rgba(20, 50, 80, 0.15);
+  --gradient-bg-2: rgba(40, 20, 60, 0.1);
+  --gradient-start: #0a0a0f;
+  --gradient-mid: #0d0d0d;
+  --gradient-end: #050508;
+}
+
+/* Light theme */
+:root[data-theme="light"] {
+  /* Light base colors */
+  --color-bg: #fafafa;
+  --color-bg-subtle: #f5f5f5;
+  --color-bg-muted: #e5e5e5;
+  --color-bg-elevated: #ffffff;
+
+  /* Text colors for light mode */
+  --color-text: #171717;
+  --color-text-muted: #525252;
+  --color-text-subtle: #737373;
+
+  /* Accent - amber/orange (adjusted for light) */
+  --color-accent: #ea580c;
+  --color-accent-muted: #c2410c;
+  --color-accent-subtle: #fed7aa;
+
+  /* Status colors (adjusted contrast) */
+  --color-success: #16a34a;
+  --color-error: #dc2626;
+  --color-warning: #ca8a04;
+  --color-info: #525252;
+
+  /* Border */
+  --color-border: #d4d4d4;
+  --color-border-muted: #e5e5e5;
+
+  /* Background gradients for light mode */
+  --gradient-bg-1: rgba(250, 240, 230, 0.5);
+  --gradient-bg-2: rgba(240, 240, 255, 0.3);
+  --gradient-start: #fefefe;
+  --gradient-mid: #fafafa;
+  --gradient-end: #f5f5f5;
 }
 
 /* Base styles */
@@ -48,15 +98,60 @@
 body {
   margin: 0;
   min-height: 100vh;
+  /* Layered background: radial gradient + noise texture (theme-aware) */
+  background:
+    radial-gradient(ellipse at top left, var(--gradient-bg-1), transparent 50%),
+    radial-gradient(ellipse at bottom right, var(--gradient-bg-2), transparent 50%),
+    linear-gradient(180deg, var(--gradient-start) 0%, var(--gradient-mid) 50%, var(--gradient-end) 100%);
+  background-attachment: fixed;
+  position: relative;
+  transition: background 0.3s ease;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.03;
+  z-index: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
 }
 
 #app {
   min-height: 100vh;
+  position: relative;
+  z-index: 1;
 }
 
 /* Terminal font */
 .font-mono {
   font-family: var(--font-mono);
+}
+
+/* Layered card backgrounds */
+.card-layered {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%),
+    var(--color-bg-subtle);
+  backdrop-filter: blur(10px);
+  position: relative;
+}
+
+.card-layered::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.1), transparent);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
 }
 
 /* Scrollbar styling */

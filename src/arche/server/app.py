@@ -52,10 +52,17 @@ def setup_server(project_path: Path, password: str | None = None):
     """Configure server with project path and optional auth."""
     _config["project_path"] = project_path
     _config["arche_dir"] = project_path / ".arche"
-    _config["password"] = password
 
     # Ensure .arche dir exists
     init_arche_dir(_config["arche_dir"])
+
+    # Read password from state.json if not provided via CLI
+    if not password:
+        state = read_state(_config["arche_dir"])
+        server_config = state.get("server", {})
+        password = server_config.get("password")
+
+    _config["password"] = password
 
 
 def get_arche_dir() -> Path:
@@ -122,7 +129,51 @@ class FileContent(BaseModel):
     content: str
 
 
+class SetupPasswordRequest(BaseModel):
+    password: str | None = None  # None means skip setup
+
+
 # === API Routes ===
+
+@app.get("/api/setup/status")
+async def get_setup_status():
+    """Check if initial setup is needed."""
+    arche_dir = get_arche_dir()
+    state = read_state(arche_dir)
+    server_config = state.get("server", {})
+
+    # Setup is needed if no password is configured (neither in state nor via CLI)
+    needs_setup = not _config["password"] and not server_config.get("password")
+
+    return {
+        "needs_setup": needs_setup,
+        "password_configured": bool(_config["password"] or server_config.get("password")),
+    }
+
+
+@app.post("/api/setup/password")
+async def setup_password(req: SetupPasswordRequest):
+    """Set password on first-time setup (no auth required)."""
+    arche_dir = get_arche_dir()
+    state = read_state(arche_dir)
+    server_config = state.get("server", {})
+
+    # Only allow if setup is needed
+    if _config["password"] or server_config.get("password"):
+        raise HTTPException(403, "Password already configured")
+
+    # Update state
+    server_config["password"] = req.password
+    server_config["setup_completed"] = True
+    state["server"] = server_config
+    write_state(arche_dir, state)
+
+    # Update runtime config
+    if req.password:
+        _config["password"] = req.password
+
+    return {"status": "configured", "password_set": bool(req.password)}
+
 
 @app.get("/api/status", response_model=StatusResponse)
 async def get_status(auth: bool = Depends(verify_auth)):
