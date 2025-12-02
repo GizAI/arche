@@ -18,7 +18,7 @@ Review the previous execution. Test thoroughly. Update plan with issues found.
 
 ## Define Standards (RULE_PROJECT.md)
 
-Analyze existing codebase first. Document discovered patterns or define new:
+Analyze existing codebase first. Document discovered patterns or define new concisely:
 
 **UI** (Existing patterns → follow. No patterns → define minimal standards):
 - Colors: primary, secondary, accent, semantic (success/error/warning), neutrals

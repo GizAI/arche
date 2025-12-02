@@ -221,17 +221,14 @@ def read_goal_from_plan(arche_dir: Path) -> str | None:
 
 
 def read_feedback(arche_dir: Path) -> str:
-    """Read all pending feedback files."""
+    """Read all pending feedback files (any extension)."""
     feedback_dir = arche_dir / "feedback"
     if not feedback_dir.exists():
         return ""
-    files = sorted(f for f in feedback_dir.glob("*.yaml") if f.is_file())
+    files = sorted(f for f in feedback_dir.iterdir() if f.is_file())
     if not files:
         return ""
-    parts = []
-    for f in files:
-        parts.append(f"### {f.name}\n{f.read_text()}")
-    return "\n\n".join(parts)
+    return "\n\n".join(f"### {f.name}\n{f.read_text()}" for f in files)
 
 
 def archive_feedback(arche_dir: Path):
@@ -241,7 +238,7 @@ def archive_feedback(arche_dir: Path):
     if not feedback_dir.exists():
         return
     archive_dir.mkdir(exist_ok=True)
-    for f in feedback_dir.glob("*.yaml"):
+    for f in feedback_dir.iterdir():
         if f.is_file():
             f.rename(archive_dir / f.name)
 
