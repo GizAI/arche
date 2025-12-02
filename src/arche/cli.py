@@ -151,17 +151,19 @@ def build_claude_cmd(
         "--permission-mode", "plan",
     ]
 
-    # Add system prompt from RULE.md
+    # Render system prompt from RULE.md template
     if rule_file.exists():
-        cmd.extend(["--system-prompt", rule_file.read_text()])
+        rule_template = Template(rule_file.read_text())
+        rule_prompt = rule_template.render(infinite=infinite)
+        cmd.extend(["--system-prompt", rule_prompt])
 
     # Add extra claude args (passed through from arche start)
     if extra_args:
         cmd.extend(extra_args)
 
-    # Render prompt from template
-    template = Template(get_prompt_template())
-    prompt = template.render(turn=turn, goal=goal or "Continue", infinite=infinite)
+    # Render prompt from PROMPT.md template
+    prompt_template = Template(get_prompt_template())
+    prompt = prompt_template.render(turn=turn, goal=goal or "Continue", infinite=infinite)
     cmd.append(prompt)
     return cmd
 

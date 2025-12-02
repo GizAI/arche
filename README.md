@@ -179,13 +179,27 @@ Claude Code runs with `cwd = .arche/`, so:
 - RULE.md is in current directory
 - User project files are accessed via `../` (parent directory)
 
+## Templates
+
+Both RULE.md and PROMPT.md are Jinja2 templates that adapt based on context:
+
+**RULE.md variables:**
+- `infinite` (bool) - Infinite mode shows concise instructions, task mode includes ARCHE_DONE condition
+
+**PROMPT.md variables:**
+- `turn` (int) - Current turn number
+- `goal` (str) - Initial goal (first turn only, "Continue" for subsequent turns)
+- `infinite` (bool) - Mode indicator
+
+This filters unnecessary instructions and keeps prompts concise.
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `src/arche/cli.py` | CLI commands (start, stop, resume, log, status, feedback) |
-| `src/arche/RULE.md` | System prompt template (copied to .arche/) |
-| `src/arche/PROMPT.md` | Jinja2 prompt template |
+| `src/arche/RULE.md` | System prompt Jinja2 template (copied to .arche/) |
+| `src/arche/PROMPT.md` | User prompt Jinja2 template |
 | `pyproject.toml` | Package config |
 
 ## License
