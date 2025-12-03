@@ -23,7 +23,15 @@ from arche.server.interactive import (
     list_existing_sessions,
     get_available_models,
     get_default_model,
+    THINKING_BUDGETS,
 )
+from arche.server.background_tasks import background_task_manager, TaskStatus
+from arche.server.checkpoints import checkpoint_manager
+from arche.server.mcp_manager import mcp_server_manager, MCPServerConfig, MCPServerType
+from arche.server.custom_commands import command_manager
+from arche.server.hooks import hooks_manager, HookConfig, HookType
+from arche.server.commands import handle_websocket_message, CommandContext
+from arche.server.oauth_api import get_usage, get_profile
 
 # Import utilities from cli - no duplication
 from arche.cli import (
@@ -74,6 +82,29 @@ async def startup_auto_init():
         arche_dir = cwd / ".arche"
         if arche_dir.exists():
             setup_server(cwd)
+
+    # Initialize extended managers if config is ready
+    if _config["_initialized"] and _config["arche_dir"]:
+        arche_dir = _config["arche_dir"]
+        project_path = _config["project_path"]
+
+        # Update config directories for managers
+        hooks_manager.config_dir = arche_dir
+        checkpoint_manager.working_dir = project_path
+        checkpoint_manager._checkpoint_file = arche_dir / "checkpoints.json"
+        mcp_server_manager.config_dir = arche_dir
+
+        # Load saved hooks from config
+        await hooks_manager.load_config()
+
+        # Load saved checkpoints
+        await checkpoint_manager.load_checkpoints()
+
+        # Load custom commands
+        command_manager.load_commands(project_path)
+
+        # Load saved MCP server configs and try to reconnect
+        await mcp_server_manager.load_from_config()
 
 
 def setup_server(project_path: Path, password: str | None = None):
@@ -641,8 +672,12 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# Set up session manager broadcast callback
+# Set up broadcast callbacks for all managers
 session_manager.set_broadcast_callback(manager.broadcast_to_session)
+background_task_manager.set_broadcast_callback(manager.broadcast_to_session)
+checkpoint_manager.set_broadcast_callback(manager.broadcast_to_session)
+mcp_server_manager.set_broadcast_callback(manager.broadcast_to_session)
+hooks_manager.set_broadcast_callback(manager.broadcast_to_session)
 
 
 @app.websocket("/ws/logs")
@@ -750,6 +785,8 @@ class CreateSessionRequest(BaseModel):
     cwd: str | None = None
     permission_mode: str = "default"
     resume: str | None = None  # Session ID to resume from Claude CLI
+    engine: str = "claude_sdk"  # claude_sdk | deepagents
+    capabilities: list[str] | None = None  # DeepAgents capabilities
 
 
 class SendMessageRequest(BaseModel):
@@ -768,6 +805,17 @@ class UpdateSessionRequest(BaseModel):
     name: str | None = None
     model: str | None = None
     permission_mode: str | None = None
+    engine: str | None = None
+    capabilities: list[str] | None = None
+
+
+class TodoRequest(BaseModel):
+    content: str
+    priority: int = 0
+
+
+class TodoStatusRequest(BaseModel):
+    status: str  # pending, in_progress, completed
 
 
 @app.get("/api/interactive/sessions")
@@ -830,7 +878,9 @@ async def create_interactive_session(
         model=model,
         cwd=cwd,
         permission_mode=req.permission_mode,
-        resume=req.resume,  # Pass resume session ID
+        resume=req.resume,
+        engine=req.engine,
+        capabilities=req.capabilities,
     )
     return {"session": session.to_dict()}
 
@@ -947,6 +997,753 @@ async def get_session_messages(
     return {"messages": [m.to_dict() for m in session.messages]}
 
 
+# === DeepAgents Specific Endpoints ===
+
+@app.get("/api/interactive/sessions/{session_id}/todos")
+async def get_session_todos(
+    session_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Get todo list for a session."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return {"todos": [t.to_dict() for t in session.todos]}
+
+
+@app.post("/api/interactive/sessions/{session_id}/todos")
+async def add_session_todo(
+    session_id: str,
+    req: TodoRequest,
+    auth: bool = Depends(require_auth),
+):
+    """Add a new todo item."""
+    todo = await session_manager.add_todo(session_id, req.content, req.priority)
+    if not todo:
+        raise HTTPException(404, "Session not found")
+    return {"todo": todo.to_dict()}
+
+
+@app.patch("/api/interactive/sessions/{session_id}/todos/{todo_id}")
+async def update_session_todo(
+    session_id: str,
+    todo_id: str,
+    req: TodoStatusRequest,
+    auth: bool = Depends(require_auth),
+):
+    """Update a todo item's status."""
+    success = await session_manager.update_todo_status(session_id, todo_id, req.status)
+    if not success:
+        raise HTTPException(404, "Session or todo not found")
+    return {"status": "updated"}
+
+
+@app.delete("/api/interactive/sessions/{session_id}/todos/{todo_id}")
+async def delete_session_todo(
+    session_id: str,
+    todo_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Delete a todo item."""
+    success = await session_manager.delete_todo(session_id, todo_id)
+    if not success:
+        raise HTTPException(404, "Session or todo not found")
+    return {"status": "deleted"}
+
+
+@app.get("/api/interactive/sessions/{session_id}/file-operations")
+async def get_session_file_operations(
+    session_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Get file operations for a session."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return {"file_operations": [f.to_dict() for f in session.file_operations]}
+
+
+@app.get("/api/interactive/skills")
+async def list_available_skills(auth: bool = Depends(require_auth)):
+    """List available skills."""
+    arche_dir = get_arche_dir()
+    skills_dir = arche_dir / "skills"
+    skills = []
+
+    if skills_dir.exists():
+        for skill_dir in skills_dir.iterdir():
+            if skill_dir.is_dir():
+                skill_yaml = skill_dir / "skill.yaml"
+                if skill_yaml.exists():
+                    try:
+                        import yaml
+                        with open(skill_yaml) as f:
+                            data = yaml.safe_load(f)
+                        skills.append({
+                            "name": skill_dir.name,
+                            "description": data.get("description", ""),
+                        })
+                    except Exception:
+                        skills.append({
+                            "name": skill_dir.name,
+                            "description": "",
+                        })
+
+    return {"skills": skills}
+
+
+@app.post("/api/interactive/sessions/{session_id}/skills/{skill_name}")
+async def load_skill(
+    session_id: str,
+    skill_name: str,
+    auth: bool = Depends(require_auth),
+):
+    """Load a skill into a session."""
+    success = await session_manager.load_skill(session_id, skill_name)
+    if not success:
+        raise HTTPException(404, "Session or skill not found")
+    return {"status": "loaded"}
+
+
+@app.delete("/api/interactive/sessions/{session_id}/skills/{skill_name}")
+async def unload_skill(
+    session_id: str,
+    skill_name: str,
+    auth: bool = Depends(require_auth),
+):
+    """Unload a skill from a session."""
+    success = await session_manager.unload_skill(session_id, skill_name)
+    if not success:
+        raise HTTPException(404, "Session not found or skill not loaded")
+    return {"status": "unloaded"}
+
+
+@app.post("/api/interactive/sessions/{session_id}/engine")
+async def set_session_engine(
+    session_id: str,
+    engine: str,
+    auth: bool = Depends(require_auth),
+):
+    """Change the engine for a session."""
+    success = await session_manager.set_engine(session_id, engine)
+    if not success:
+        raise HTTPException(400, "Invalid engine or session not found")
+    return {"status": "updated", "engine": engine}
+
+
+@app.post("/api/interactive/sessions/{session_id}/capabilities")
+async def set_session_capabilities(
+    session_id: str,
+    capabilities: list[str],
+    auth: bool = Depends(require_auth),
+):
+    """Update session capabilities."""
+    success = await session_manager.set_capabilities(session_id, capabilities)
+    if not success:
+        raise HTTPException(404, "Session not found")
+    return {"status": "updated", "capabilities": capabilities}
+
+
+@app.get("/api/interactive/sessions/{session_id}/usage")
+async def get_session_usage(
+    session_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Get token usage for a session."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return {
+        "input_tokens": session.input_tokens,
+        "output_tokens": session.output_tokens,
+        "total_cost_usd": session.total_cost_usd,
+    }
+
+
+# --- File Operations Approval ---
+
+class FileOpRejectRequest(BaseModel):
+    reason: str | None = None
+
+
+@app.post("/api/interactive/sessions/{session_id}/file-operations/{op_id}/approve")
+async def approve_file_operation(
+    session_id: str,
+    op_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Approve a pending file operation."""
+    success = await session_manager.approve_file_operation(session_id, op_id)
+    if not success:
+        raise HTTPException(404, "Session or operation not found")
+    return {"status": "approved"}
+
+
+@app.post("/api/interactive/sessions/{session_id}/file-operations/{op_id}/reject")
+async def reject_file_operation(
+    session_id: str,
+    op_id: str,
+    req: FileOpRejectRequest = FileOpRejectRequest(),
+    auth: bool = Depends(require_auth),
+):
+    """Reject a pending file operation."""
+    success = await session_manager.reject_file_operation(session_id, op_id, req.reason)
+    if not success:
+        raise HTTPException(404, "Session or operation not found")
+    return {"status": "rejected"}
+
+
+# === Extended Claude Code Features ===
+
+class ThinkingModeRequest(BaseModel):
+    mode: str  # normal, think, think_hard, ultrathink
+
+
+class PlanModeRequest(BaseModel):
+    enabled: bool
+
+
+class BudgetRequest(BaseModel):
+    budget_usd: float | None
+
+
+class BackgroundTaskRequest(BaseModel):
+    command: str
+    timeout: float | None = None
+
+
+class CheckpointRequest(BaseModel):
+    name: str
+    description: str | None = None
+
+
+class MCPServerRequest(BaseModel):
+    name: str
+    type: str  # stdio, sse, http
+    command: str | None = None
+    args: list[str] = []
+    env: dict[str, str] = {}
+    url: str | None = None
+    headers: dict[str, str] = {}
+
+
+class HookRequest(BaseModel):
+    id: str | None = None  # Auto-generated if not provided
+    name: str | None = None  # Auto-generated if not provided
+    type: str  # pre_tool_use, post_tool_use, user_prompt_submit, stop
+    enabled: bool = True
+    matcher: str | None = None
+    command: str | None = None
+    timeout: float = 30.0
+
+
+# --- Thinking Mode ---
+
+@app.get("/api/interactive/sessions/{session_id}/thinking-mode")
+async def get_thinking_mode(
+    session_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Get current thinking mode for session."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return {
+        "mode": session.thinking_mode,
+        "available_modes": list(THINKING_BUDGETS.keys()),
+    }
+
+
+@app.post("/api/interactive/sessions/{session_id}/thinking-mode")
+async def set_thinking_mode(
+    session_id: str,
+    req: ThinkingModeRequest,
+    auth: bool = Depends(require_auth),
+):
+    """Set thinking mode for session."""
+    success = await session_manager.set_thinking_mode(session_id, req.mode)
+    if not success:
+        raise HTTPException(400, "Invalid mode or session not found")
+    return {"status": "updated", "mode": req.mode}
+
+
+# --- Plan Mode ---
+
+@app.get("/api/interactive/sessions/{session_id}/plan-mode")
+async def get_plan_mode(
+    session_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Get plan mode status for session."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return {
+        "enabled": session.plan_mode_active,
+        "proposed_plan": session.proposed_plan,
+    }
+
+
+@app.post("/api/interactive/sessions/{session_id}/plan-mode")
+async def set_plan_mode(
+    session_id: str,
+    req: PlanModeRequest,
+    auth: bool = Depends(require_auth),
+):
+    """Enable/disable plan mode for session."""
+    success = await session_manager.set_plan_mode(session_id, req.enabled)
+    if not success:
+        raise HTTPException(404, "Session not found")
+    return {"status": "updated", "enabled": req.enabled}
+
+
+@app.post("/api/interactive/sessions/{session_id}/approve-plan")
+async def approve_plan(
+    session_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Approve the proposed plan and exit plan mode."""
+    success = await session_manager.approve_plan(session_id)
+    if not success:
+        raise HTTPException(400, "No plan to approve or session not found")
+    return {"status": "approved"}
+
+
+# --- Mode Approval ---
+
+class ApprovalResponseRequest(BaseModel):
+    """Request to respond to a mode approval."""
+    decision: str  # approve, modify, reject
+    feedback: str | None = None
+    modified_result: dict | None = None
+
+
+@app.get("/api/interactive/sessions/{session_id}/approval")
+async def get_approval_status(
+    session_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Get pending approval request if any."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    return {
+        "has_pending": session.pending_approval is not None,
+        "approval": session.pending_approval,
+    }
+
+
+@app.post("/api/interactive/sessions/{session_id}/approval")
+async def respond_to_approval(
+    session_id: str,
+    req: ApprovalResponseRequest,
+    auth: bool = Depends(require_auth),
+):
+    """Respond to a pending approval request."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    if not session.pending_approval:
+        raise HTTPException(400, "No pending approval")
+
+    # Write response file (daemon reads it)
+    from pathlib import Path
+    arche_dir = Path(session.cwd) / ".arche"
+    response = {"action": req.decision}
+    if req.feedback:
+        response["feedback"] = req.feedback
+    if req.modified_result:
+        response["modified_result"] = req.modified_result
+
+    (arche_dir / "approval_response.json").write_text(json.dumps(response))
+
+    # Clear pending
+    session.pending_approval = None
+    session.state = SessionState.IDLE
+
+    await session_manager._broadcast_to_session(session_id, {
+        "type": "approval_response",
+        "decision": req.decision,
+    })
+
+    return {"status": "responded", "decision": req.decision}
+
+
+# --- Budget Control ---
+
+@app.post("/api/interactive/sessions/{session_id}/budget")
+async def set_budget(
+    session_id: str,
+    req: BudgetRequest,
+    auth: bool = Depends(require_auth),
+):
+    """Set budget limit for session."""
+    success = await session_manager.set_budget(session_id, req.budget_usd)
+    if not success:
+        raise HTTPException(404, "Session not found")
+    return {"status": "updated", "budget_usd": req.budget_usd}
+
+
+# --- Background Tasks ---
+
+@app.get("/api/interactive/sessions/{session_id}/background-tasks")
+async def list_background_tasks(
+    session_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """List background tasks for session."""
+    tasks = background_task_manager.list_tasks(session_id)
+    return {"tasks": [t.to_dict() for t in tasks]}
+
+
+@app.post("/api/interactive/sessions/{session_id}/background-tasks")
+async def create_background_task(
+    session_id: str,
+    req: BackgroundTaskRequest,
+    auth: bool = Depends(require_auth),
+):
+    """Start a background task."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    task = await background_task_manager.start_task(
+        session_id=session_id,
+        command=req.command,
+        cwd=session.cwd,
+        timeout=req.timeout,
+    )
+    return {"task": task.to_dict()}
+
+
+@app.get("/api/interactive/sessions/{session_id}/background-tasks/{task_id}")
+async def get_background_task(
+    session_id: str,
+    task_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Get background task details."""
+    task = background_task_manager.get_task(task_id)
+    if not task or task.session_id != session_id:
+        raise HTTPException(404, "Task not found")
+    return {"task": task.to_dict()}
+
+
+@app.get("/api/interactive/sessions/{session_id}/background-tasks/{task_id}/output")
+async def get_background_task_output(
+    session_id: str,
+    task_id: str,
+    since_line: int = 0,
+    limit: int = 100,
+    auth: bool = Depends(require_auth),
+):
+    """Get background task output."""
+    task = background_task_manager.get_task(task_id)
+    if not task or task.session_id != session_id:
+        raise HTTPException(404, "Task not found")
+
+    lines, has_more = background_task_manager.get_output(task_id, since_line, limit)
+    return {
+        "lines": lines,
+        "has_more": has_more,
+        "total_lines": len(task.output_lines),
+    }
+
+
+@app.delete("/api/interactive/sessions/{session_id}/background-tasks/{task_id}")
+async def cancel_background_task(
+    session_id: str,
+    task_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Cancel a background task."""
+    task = background_task_manager.get_task(task_id)
+    if not task or task.session_id != session_id:
+        raise HTTPException(404, "Task not found")
+
+    success = await background_task_manager.cancel_task(task_id)
+    if not success:
+        raise HTTPException(400, "Task cannot be cancelled")
+    return {"status": "cancelled"}
+
+
+# --- Checkpoints ---
+
+@app.get("/api/interactive/sessions/{session_id}/checkpoints")
+async def list_checkpoints(
+    session_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """List checkpoints for session."""
+    checkpoints = checkpoint_manager.list_checkpoints(session_id)
+    return {"checkpoints": [c.to_dict() for c in checkpoints]}
+
+
+@app.post("/api/interactive/sessions/{session_id}/checkpoints")
+async def create_checkpoint(
+    session_id: str,
+    req: CheckpointRequest,
+    auth: bool = Depends(require_auth),
+):
+    """Create a checkpoint."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    checkpoint = await checkpoint_manager.create_checkpoint(
+        session_id=session_id,
+        name=req.name,
+        description=req.description,
+        cwd=Path(session.cwd),
+    )
+    if not checkpoint:
+        raise HTTPException(500, "Failed to create checkpoint (not a git repo?)")
+    return {"checkpoint": checkpoint.to_dict()}
+
+
+@app.post("/api/interactive/sessions/{session_id}/checkpoints/{checkpoint_id}/restore")
+async def restore_checkpoint(
+    session_id: str,
+    checkpoint_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Restore to a checkpoint."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    success = await checkpoint_manager.restore_checkpoint(
+        session_id=session_id,
+        checkpoint_id=checkpoint_id,
+        cwd=Path(session.cwd),
+    )
+    if not success:
+        raise HTTPException(400, "Failed to restore checkpoint")
+    return {"status": "restored"}
+
+
+@app.delete("/api/interactive/sessions/{session_id}/checkpoints/{checkpoint_id}")
+async def delete_checkpoint(
+    session_id: str,
+    checkpoint_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Delete a checkpoint."""
+    success = await checkpoint_manager.delete_checkpoint(checkpoint_id)
+    if not success:
+        raise HTTPException(404, "Checkpoint not found")
+    return {"status": "deleted"}
+
+
+# --- MCP Servers ---
+
+@app.get("/api/mcp/servers")
+async def list_mcp_servers(auth: bool = Depends(require_auth)):
+    """List all MCP servers."""
+    servers = mcp_server_manager.list_servers()
+    return {"servers": [s.to_dict() for s in servers]}
+
+
+@app.post("/api/mcp/servers")
+async def add_mcp_server(
+    req: MCPServerRequest,
+    auth: bool = Depends(require_auth),
+):
+    """Add and connect to an MCP server."""
+    try:
+        config = MCPServerConfig(
+            name=req.name,
+            type=MCPServerType(req.type),
+            command=req.command,
+            args=req.args,
+            env=req.env,
+            url=req.url,
+            headers=req.headers,
+        )
+        server = await mcp_server_manager.add_server(config)
+        return {"server": server.to_dict()}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/mcp/servers/{name}")
+async def get_mcp_server(
+    name: str,
+    auth: bool = Depends(require_auth),
+):
+    """Get MCP server details."""
+    server = mcp_server_manager.get_server(name)
+    if not server:
+        raise HTTPException(404, "Server not found")
+    return {"server": server.to_dict()}
+
+
+@app.get("/api/mcp/servers/{name}/tools")
+async def get_mcp_server_tools(
+    name: str,
+    auth: bool = Depends(require_auth),
+):
+    """Get tools from an MCP server."""
+    server = mcp_server_manager.get_server(name)
+    if not server:
+        raise HTTPException(404, "Server not found")
+    return {"tools": [t.to_dict() for t in server.tools]}
+
+
+@app.delete("/api/mcp/servers/{name}")
+async def remove_mcp_server(
+    name: str,
+    auth: bool = Depends(require_auth),
+):
+    """Remove an MCP server."""
+    success = await mcp_server_manager.remove_server(name)
+    if not success:
+        raise HTTPException(404, "Server not found")
+    return {"status": "removed"}
+
+
+@app.get("/api/mcp/tools")
+async def list_all_mcp_tools(auth: bool = Depends(require_auth)):
+    """Get all tools from all connected MCP servers."""
+    tools = mcp_server_manager.get_all_tools()
+    return {"tools": tools}
+
+
+# --- Custom Commands ---
+
+@app.get("/api/commands")
+async def list_commands(auth: bool = Depends(require_auth)):
+    """List all available commands (built-in + custom)."""
+    arche_dir = get_arche_dir()
+    command_manager.load_commands(arche_dir.parent)
+    commands = command_manager.list_commands()
+    return {"commands": commands}
+
+
+@app.post("/api/commands/{name}/execute")
+async def execute_command(
+    name: str,
+    args: list[str] | None = None,
+    kwargs: dict[str, str] | None = None,
+    auth: bool = Depends(require_auth),
+):
+    """Execute a custom command."""
+    try:
+        prompt, metadata = command_manager.execute_command(name, args, kwargs)
+        return {
+            "prompt": prompt,
+            "metadata": metadata,
+        }
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/commands/reload")
+async def reload_commands(auth: bool = Depends(require_auth)):
+    """Reload custom commands from disk."""
+    arche_dir = get_arche_dir()
+    count = command_manager.load_commands(arche_dir.parent)
+    return {"status": "reloaded", "count": count}
+
+
+# --- Hooks ---
+
+@app.get("/api/hooks")
+async def list_hooks(
+    type: str | None = None,
+    auth: bool = Depends(require_auth),
+):
+    """List all hooks."""
+    hook_type = HookType(type) if type else None
+    hooks = hooks_manager.list_hooks(hook_type)
+    return {"hooks": [h.to_dict() for h in hooks]}
+
+
+@app.post("/api/hooks")
+async def register_hook(
+    req: HookRequest,
+    auth: bool = Depends(require_auth),
+):
+    """Register a new hook."""
+    try:
+        # Auto-generate id and name if not provided
+        hook_id = req.id or secrets.token_hex(4)
+        hook_name = req.name or f"{req.type}-hook-{hook_id[:8]}"
+
+        config = HookConfig(
+            id=hook_id,
+            name=hook_name,
+            type=HookType(req.type),
+            enabled=req.enabled,
+            matcher=req.matcher,
+            command=req.command,
+            timeout=req.timeout,
+        )
+        hook = hooks_manager.register_hook(config)
+        return {"hook": hook.to_dict()}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/hooks/{hook_id}")
+async def get_hook(
+    hook_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Get hook details."""
+    hook = hooks_manager.get_hook(hook_id)
+    if not hook:
+        raise HTTPException(404, "Hook not found")
+    return {"hook": hook.to_dict()}
+
+
+@app.patch("/api/hooks/{hook_id}")
+async def update_hook(
+    hook_id: str,
+    enabled: bool,
+    auth: bool = Depends(require_auth),
+):
+    """Enable/disable a hook."""
+    success = hooks_manager.set_hook_enabled(hook_id, enabled)
+    if not success:
+        raise HTTPException(404, "Hook not found")
+    return {"status": "updated", "enabled": enabled}
+
+
+@app.delete("/api/hooks/{hook_id}")
+async def unregister_hook(
+    hook_id: str,
+    auth: bool = Depends(require_auth),
+):
+    """Unregister a hook."""
+    success = hooks_manager.unregister_hook(hook_id)
+    if not success:
+        raise HTTPException(404, "Hook not found")
+    return {"status": "unregistered"}
+
+
+# --- OAuth API (Usage & Profile) ---
+
+@app.get("/api/usage")
+async def get_api_usage(auth: bool = Depends(require_auth)):
+    """Get API usage information."""
+    usage = get_usage()
+    if not usage:
+        return {"error": "Unable to fetch usage (check credentials)"}
+    return {"usage": usage.to_dict()}
+
+
+@app.get("/api/profile")
+async def get_api_profile(auth: bool = Depends(require_auth)):
+    """Get user profile information."""
+    profile = get_profile()
+    if not profile:
+        return {"error": "Unable to fetch profile (check credentials)"}
+    return {"profile": profile.to_dict()}
+
+
 @app.websocket("/ws/interactive/{session_id}")
 async def websocket_interactive(websocket: WebSocket, session_id: str):
     """WebSocket for real-time interactive session updates."""
@@ -973,31 +1770,20 @@ async def websocket_interactive(websocket: WebSocket, session_id: str):
             try:
                 data = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
 
-                # Handle client messages
+                # Handle client messages using Command pattern
                 msg_type = data.get("type")
-
-                if msg_type == "send_message":
-                    content = data.get("content", "")
-                    system_prompt = data.get("system_prompt")
-                    if content:
-                        await session_manager.send_message(
-                            session_id, content, system_prompt
-                        )
-
-                elif msg_type == "interrupt":
-                    await session_manager.interrupt_session(session_id)
-
-                elif msg_type == "permission_response":
-                    await session_manager.respond_to_permission(
-                        session_id,
-                        data.get("request_id", ""),
-                        data.get("allow", False),
-                        modified_input=data.get("modified_input"),
-                        reason=data.get("reason"),
+                if msg_type:
+                    # Create command context with all managers
+                    cmd_context = CommandContext(
+                        session_manager=session_manager,
+                        background_task_manager=background_task_manager,
+                        checkpoint_manager=checkpoint_manager,
+                        mcp_server_manager=mcp_server_manager,
+                        hooks_manager=hooks_manager,
+                        websocket=websocket,
                     )
-
-                elif msg_type == "ping":
-                    await websocket.send_json({"type": "pong"})
+                    # Dispatch to registered command handler
+                    await handle_websocket_message(msg_type, session_id, data, cmd_context)
 
             except asyncio.TimeoutError:
                 # Send ping to keep connection alive

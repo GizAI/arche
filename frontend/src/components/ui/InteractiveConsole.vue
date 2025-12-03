@@ -1,6 +1,24 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
-import type { Message, ContentBlock, SessionState } from '@/stores/interactive'
+import type {
+  Message,
+  ContentBlock,
+  SessionState,
+  EngineType,
+  AgentCapability,
+  TodoItem,
+  TodoStatus,
+  FileOperation,
+  SkillInfo,
+} from '@/stores/interactive'
+
+// Import DeepAgents components
+import EngineSelector from './chat/EngineSelector.vue'
+import CapabilityToggles from './chat/CapabilityToggles.vue'
+import TokenCounter from './chat/TokenCounter.vue'
+import TodoPanel from './chat/TodoPanel.vue'
+import SkillSelector from './chat/SkillSelector.vue'
+import FileOperationModal from './chat/FileOperationModal.vue'
 
 const props = defineProps<{
   messages: Message[]
@@ -10,6 +28,15 @@ const props = defineProps<{
   sessionName: string
   model: string
   totalCost: number
+  // DeepAgents props
+  engine: EngineType
+  enabledCapabilities: AgentCapability[]
+  inputTokens: number
+  outputTokens: number
+  todos: TodoItem[]
+  loadedSkills: string[]
+  availableSkills: SkillInfo[]
+  pendingFileOperation: FileOperation | null
 }>()
 
 const emit = defineEmits<{
@@ -17,6 +44,16 @@ const emit = defineEmits<{
   interrupt: []
   clear: []
   compact: []
+  // DeepAgents events
+  'update:engine': [engine: EngineType]
+  'update:capabilities': [capabilities: AgentCapability[]]
+  addTodo: [content: string, priority: number]
+  updateTodo: [todoId: string, status: TodoStatus]
+  deleteTodo: [todoId: string]
+  loadSkill: [skillName: string]
+  unloadSkill: [skillName: string]
+  approveFileOp: [opId: string]
+  rejectFileOp: [opId: string, reason?: string]
 }>()
 
 const input = ref('')
@@ -24,6 +61,12 @@ const messagesContainer = ref<HTMLElement | null>(null)
 const inputRef = ref<HTMLTextAreaElement | null>(null)
 const showThinking = ref(false)
 const showSlashMenu = ref(false)
+const showTodoPanel = ref(false)
+
+// DeepAgents computed
+const isDeepAgents = computed(() => props.engine === 'deepagents')
+const hasTodos = computed(() => props.todos.length > 0)
+const activeTodoCount = computed(() => props.todos.filter(t => t.status !== 'completed').length)
 
 // Slash commands
 const slashCommands = [
@@ -164,14 +207,44 @@ function formatToolArgs(args: any): string {
 </script>
 
 <template>
-  <div class="console">
+  <div class="console" :class="{ 'with-todo-panel': showTodoPanel && isDeepAgents }">
     <!-- Header -->
     <div class="console-header">
       <div class="header-left">
         <h2>{{ sessionName }}</h2>
         <span class="model-badge">{{ model }}</span>
+        <EngineSelector
+          :modelValue="engine"
+          :disabled="isProcessing"
+          @update:modelValue="emit('update:engine', $event)"
+        />
       </div>
       <div class="header-right">
+        <!-- DeepAgents Controls -->
+        <template v-if="isDeepAgents">
+          <CapabilityToggles
+            :modelValue="enabledCapabilities"
+            :disabled="isProcessing"
+            @update:modelValue="emit('update:capabilities', $event)"
+          />
+          <SkillSelector
+            :available="availableSkills"
+            :loaded="loadedSkills"
+            :disabled="isProcessing"
+            @load="emit('loadSkill', $event)"
+            @unload="emit('unloadSkill', $event)"
+          />
+          <TokenCounter :input="inputTokens" :output="outputTokens" />
+          <button
+            class="todo-toggle"
+            :class="{ active: showTodoPanel, 'has-active': activeTodoCount > 0 }"
+            @click="showTodoPanel = !showTodoPanel"
+            title="Toggle tasks panel"
+          >
+            <span class="todo-icon">📋</span>
+            <span v-if="activeTodoCount > 0" class="todo-badge">{{ activeTodoCount }}</span>
+          </button>
+        </template>
         <span class="cost" v-if="totalCost > 0">${{ totalCost.toFixed(4) }}</span>
         <span class="status-badge" :class="sessionState">
           {{ sessionState }}
@@ -179,9 +252,11 @@ function formatToolArgs(args: any): string {
       </div>
     </div>
 
-    <!-- Messages -->
-    <div class="messages" ref="messagesContainer">
-      <template v-for="msg in messages" :key="msg.id">
+    <!-- Main Area with Messages and optional Todo Panel -->
+    <div class="main-area">
+      <!-- Messages -->
+      <div class="messages" ref="messagesContainer">
+        <template v-for="msg in messages" :key="msg.id">
         <!-- User Message -->
         <div v-if="msg.role === 'user'" class="message user-message">
           <div class="message-header">
@@ -268,6 +343,26 @@ function formatToolArgs(args: any): string {
         <span>{{ sessionState === 'tool_executing' ? 'Executing tool...' : 'Thinking...' }}</span>
       </div>
     </div>
+
+      <!-- Todo Panel (DeepAgents) -->
+      <Transition name="todo-panel">
+        <TodoPanel
+          v-if="showTodoPanel && isDeepAgents"
+          :todos="todos"
+          @add="(content, priority) => emit('addTodo', content, priority)"
+          @update="(id, status) => emit('updateTodo', id, status)"
+          @delete="(id) => emit('deleteTodo', id)"
+        />
+      </Transition>
+    </div>
+
+    <!-- File Operation Modal (DeepAgents) -->
+    <FileOperationModal
+      v-if="pendingFileOperation"
+      :operation="pendingFileOperation"
+      @approve="emit('approveFileOp', $event)"
+      @reject="(opId, reason) => emit('rejectFileOp', opId, reason)"
+    />
 
     <!-- Input Area -->
     <div class="input-area">
@@ -734,5 +829,125 @@ function formatToolArgs(args: any): string {
 /* Input area needs position relative for slash menu */
 .input-area {
   position: relative;
+}
+
+/* ===== DeepAgents UI Styles ===== */
+
+/* Main area container for messages + todo panel */
+.main-area {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.main-area .messages {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Console with todo panel */
+.console.with-todo-panel .main-area {
+  gap: 0;
+}
+
+/* Todo toggle button */
+.todo-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.375rem 0.625rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.todo-toggle:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+
+.todo-toggle.active {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-bg);
+}
+
+.todo-toggle.has-active .todo-icon {
+  animation: pulse-icon 2s ease-in-out infinite;
+}
+
+@keyframes pulse-icon {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.todo-icon {
+  font-size: 0.875rem;
+}
+
+.todo-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 9999px;
+  background: var(--color-error);
+  color: white;
+  font-size: 0.625rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.todo-toggle.active .todo-badge {
+  background: var(--color-bg);
+  color: var(--color-accent);
+}
+
+/* Todo panel transitions */
+.todo-panel-enter-active,
+.todo-panel-leave-active {
+  transition: all 0.25s ease;
+}
+
+.todo-panel-enter-from {
+  opacity: 0;
+  transform: translateX(100%);
+}
+
+.todo-panel-leave-to {
+  opacity: 0;
+  transform: translateX(100%);
+}
+
+/* Header right gap adjustment for DeepAgents controls */
+.header-right {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+@media (max-width: 900px) {
+  .header-right {
+    gap: 0.5rem;
+  }
+
+  .console-header {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  .header-left, .header-right {
+    width: 100%;
+    justify-content: flex-start;
+  }
 }
 </style>

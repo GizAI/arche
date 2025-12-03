@@ -2,6 +2,8 @@
 
 Multi-session management with real-time WebSocket communication,
 human-in-the-loop permission handling, and streaming responses.
+
+Supports both Claude SDK and DeepAgents engines with full middleware support.
 """
 
 import asyncio
@@ -9,7 +11,6 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
@@ -25,85 +26,32 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import StreamEvent
 
-
-class SessionState(str, Enum):
-    """Session lifecycle states."""
-    IDLE = "idle"
-    THINKING = "thinking"
-    TOOL_EXECUTING = "tool_executing"
-    PERMISSION_PENDING = "permission_pending"
-    INTERRUPTED = "interrupted"
-    COMPLETED = "completed"
-    ERROR = "error"
-
-
-class MessageRole(str, Enum):
-    """Message roles in conversation."""
-    USER = "user"
-    ASSISTANT = "assistant"
-    SYSTEM = "system"
-    TOOL_USE = "tool_use"
-    TOOL_RESULT = "tool_result"
-
-
-@dataclass
-class ContentBlock:
-    """Content block in a message."""
-    type: str  # text, thinking, tool_use, tool_result
-    content: Any
-    tool_id: str | None = None
-    tool_name: str | None = None
-
-
-@dataclass
-class Message:
-    """A message in the conversation."""
-    id: str
-    role: MessageRole
-    content: list[ContentBlock]
-    timestamp: datetime = field(default_factory=datetime.now)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "role": self.role.value,
-            "content": [
-                {
-                    "type": c.type,
-                    "content": c.content,
-                    "tool_id": c.tool_id,
-                    "tool_name": c.tool_name,
-                }
-                for c in self.content
-            ],
-            "timestamp": self.timestamp.isoformat(),
-            "metadata": self.metadata,
-        }
-
-
-@dataclass
-class PermissionRequest:
-    """A pending permission request."""
-    request_id: str
-    tool_name: str
-    tool_input: dict[str, Any]
-    suggestions: list[dict] | None = None
-    created_at: datetime = field(default_factory=datetime.now)
-
-    def to_dict(self) -> dict:
-        return {
-            "request_id": self.request_id,
-            "tool_name": self.tool_name,
-            "tool_input": self.tool_input,
-            "suggestions": self.suggestions,
-            "created_at": self.created_at.isoformat(),
-        }
+# Import domain models from core - eliminates duplicate dataclass definitions
+from arche.core import (
+    # Enums
+    EngineType,
+    AgentCapability,
+    SessionState,
+    MessageRole,
+    # Domain models
+    TodoItem,
+    SubAgentTask,
+    FileOperation,
+    SkillInfo,
+    ContentBlock,
+    Message,
+    PermissionRequest,
+    # Events
+    event_bus,
+    # Strategy patterns
+    PermissionStrategyFactory,
+)
+from arche.core.domain import DEFAULT_CAPABILITIES, THINKING_BUDGETS, PLAN_MODE_TOOLS
 
 
 @dataclass
 class Session:
-    """An interactive Claude session."""
+    """An interactive Claude session with DeepAgents support."""
     id: str
     name: str
     state: SessionState = SessionState.IDLE
@@ -116,6 +64,10 @@ class Session:
     permission_mode: str = "default"  # default, acceptEdits, plan, bypassPermissions
     resume_session_id: str | None = None  # Session ID to resume from Claude CLI
 
+    # Engine selection (DeepAgents support)
+    engine: str = "claude_sdk"  # claude_sdk | deepagents
+    enabled_capabilities: list[str] = field(default_factory=lambda: DEFAULT_CAPABILITIES.copy())
+
     # Conversation
     messages: list[Message] = field(default_factory=list)
 
@@ -124,8 +76,32 @@ class Session:
     total_cost_usd: float = 0.0
     pending_permission: PermissionRequest | None = None
 
+    # Token tracking
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    # DeepAgents state
+    todos: list[TodoItem] = field(default_factory=list)
+    subagent_tasks: list[SubAgentTask] = field(default_factory=list)
+    file_operations: list[FileOperation] = field(default_factory=list)
+    loaded_skills: list[str] = field(default_factory=list)
+
+    # Extended features
+    thinking_mode: str = "normal"  # normal, think, think_hard, ultrathink
+    plan_mode_active: bool = False
+    proposed_plan: dict | None = None
+    background_tasks: list[str] = field(default_factory=list)  # Task IDs
+    checkpoints: list[str] = field(default_factory=list)  # Checkpoint IDs
+    mcp_servers: list[str] = field(default_factory=list)  # Connected MCP server names
+    budget_usd: float | None = None  # Max budget for session
+    system_prompt: str | None = None  # Custom system prompt
+
+    # Approval system
+    pending_approval: dict | None = None  # {mode, result, created_at}
+
     # Internal
     _client: ClaudeSDKClient | None = field(default=None, repr=False)
+    _deepagent: Any = field(default=None, repr=False)  # DeepAgents compiled graph
     _task: asyncio.Task | None = field(default=None, repr=False)
     _message_queue: asyncio.Queue | None = field(default=None, repr=False)
     _permission_response: asyncio.Future | None = field(default=None, repr=False)
@@ -146,33 +122,57 @@ class Session:
             "pending_permission": self.pending_permission.to_dict() if self.pending_permission else None,
             "message_count": len(self.messages),
             "is_resumable": False,  # Active sessions are not resumable (they're already active)
+            # Engine selection
+            "engine": self.engine,
+            "enabled_capabilities": self.enabled_capabilities,
+            # Token tracking
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            # DeepAgents state
+            "todos": [t.to_dict() for t in self.todos],
+            "subagent_tasks": [t.to_dict() for t in self.subagent_tasks],
+            "file_operations": [f.to_dict() for f in self.file_operations[-20:]],  # Last 20
+            "loaded_skills": self.loaded_skills,
+            # Extended features
+            "thinking_mode": self.thinking_mode,
+            "plan_mode_active": self.plan_mode_active,
+            "proposed_plan": self.proposed_plan,
+            "background_tasks": self.background_tasks,
+            "checkpoints": self.checkpoints,
+            "mcp_servers": self.mcp_servers,
+            "budget_usd": self.budget_usd,
+            "system_prompt": self.system_prompt,
         }
         if include_messages:
             result["messages"] = [m.to_dict() for m in self.messages]
         return result
 
 
-# Type alias for broadcast callback
+# Legacy type alias for backward compatibility
 BroadcastCallback = Callable[[str, dict], Awaitable[None]]
 
 
 class SessionManager:
-    """Manages multiple interactive Claude sessions."""
+    """Manages multiple interactive Claude sessions.
+
+    Uses centralized EventBus for all broadcasts.
+    """
 
     def __init__(self, default_cwd: Path | None = None):
         self.sessions: dict[str, Session] = {}
         self.default_cwd = default_cwd or Path.cwd()
-        self._broadcast: BroadcastCallback | None = None
         self._lock = asyncio.Lock()
 
     def set_broadcast_callback(self, callback: BroadcastCallback):
-        """Set callback for broadcasting messages to WebSocket clients."""
-        self._broadcast = callback
+        """Set legacy callback - now routes through event_bus.
+
+        This callback is set on event_bus to maintain backward compatibility.
+        """
+        event_bus.set_legacy_callback(callback)
 
     async def _broadcast_to_session(self, session_id: str, message: dict):
-        """Broadcast message to session's WebSocket clients."""
-        if self._broadcast:
-            await self._broadcast(session_id, message)
+        """Broadcast message to session's WebSocket clients via EventBus."""
+        await event_bus.broadcast(session_id, message)
 
     async def create_session(
         self,
@@ -181,6 +181,8 @@ class SessionManager:
         cwd: str | None = None,
         permission_mode: str = "default",
         resume: str | None = None,
+        engine: str = "claude_sdk",
+        capabilities: list[str] | None = None,
     ) -> Session:
         """Create a new interactive session or resume an existing one.
 
@@ -190,12 +192,16 @@ class SessionManager:
             cwd: Working directory
             permission_mode: Permission mode (default, acceptEdits, plan, bypassPermissions)
             resume: Session ID from Claude CLI to resume
+            engine: Engine to use (claude_sdk, deepagents)
+            capabilities: DeepAgents capabilities to enable
         """
         session_id = str(uuid.uuid4())[:8]
 
-        # Generate name based on resume status
+        # Generate name based on resume status and engine
         if resume:
             session_name = name or f"Resumed: {resume[:8]}"
+        elif engine == "deepagents":
+            session_name = name or f"DeepAgent {len(self.sessions) + 1}"
         else:
             session_name = name or f"Session {len(self.sessions) + 1}"
 
@@ -206,6 +212,8 @@ class SessionManager:
             cwd=cwd or str(self.default_cwd),
             permission_mode=permission_mode,
             resume_session_id=resume,
+            engine=engine,
+            enabled_capabilities=capabilities or DEFAULT_CAPABILITIES.copy(),
             _message_queue=asyncio.Queue(),
         )
 
@@ -288,10 +296,15 @@ class SessionManager:
             "message": user_msg.to_dict(),
         })
 
-        # Start processing in background
-        session._task = asyncio.create_task(
-            self._process_conversation(session, content, system_prompt)
-        )
+        # Start processing in background - select engine
+        if session.engine == "deepagents":
+            session._task = asyncio.create_task(
+                self._process_deepagents_conversation(session, content, system_prompt)
+            )
+        else:
+            session._task = asyncio.create_task(
+                self._process_conversation(session, content, system_prompt)
+            )
 
         return True
 
@@ -320,15 +333,25 @@ class SessionManager:
             if session.model:
                 opts["model"] = session.model
 
-            if system_prompt:
-                opts["system_prompt"] = system_prompt
+            # Use session's system prompt or provided one
+            effective_system_prompt = system_prompt or session.system_prompt
+            if effective_system_prompt:
+                opts["system_prompt"] = effective_system_prompt
 
-            # For interactive mode, we need human-in-the-loop
-            if session.permission_mode != "bypassPermissions":
-                opts["permission_mode"] = session.permission_mode
-                opts["can_use_tool"] = self._create_permission_callback(session)
-            else:
-                opts["permission_mode"] = "bypassPermissions"
+            # Thinking mode configuration
+            if session.thinking_mode != "normal" and session.thinking_mode in THINKING_BUDGETS:
+                budget = THINKING_BUDGETS[session.thinking_mode]
+                if budget:
+                    opts["thinking"] = {"type": "enabled", "budget_tokens": budget}
+
+            # Budget control
+            if session.budget_usd:
+                opts["max_budget_usd"] = session.budget_usd
+
+            # Permission strategy - replaces if-else chain with Strategy pattern
+            permission_factory = PermissionStrategyFactory(self._create_permission_callback)
+            permission_strategy = permission_factory.create(session)
+            permission_strategy.configure_options(opts, session)
 
             # Resume from existing Claude CLI session
             if session.resume_session_id:
@@ -668,6 +691,9 @@ class SessionManager:
         name: str | None = None,
         model: str | None = None,
         permission_mode: str | None = None,
+        thinking_mode: str | None = None,
+        budget_usd: float | None = None,
+        system_prompt: str | None = None,
     ) -> Session | None:
         """Update session settings."""
         session = self.sessions.get(session_id)
@@ -680,6 +706,12 @@ class SessionManager:
             session.model = model
         if permission_mode:
             session.permission_mode = permission_mode
+        if thinking_mode and thinking_mode in THINKING_BUDGETS:
+            session.thinking_mode = thinking_mode
+        if budget_usd is not None:
+            session.budget_usd = budget_usd if budget_usd > 0 else None
+        if system_prompt is not None:
+            session.system_prompt = system_prompt if system_prompt else None
 
         session.updated_at = datetime.now()
 
@@ -689,6 +721,546 @@ class SessionManager:
         })
 
         return session
+
+    async def set_thinking_mode(self, session_id: str, mode: str) -> bool:
+        """Set thinking mode for a session."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        if mode not in THINKING_BUDGETS:
+            return False
+
+        session.thinking_mode = mode
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "thinking_mode_changed",
+            "mode": mode,
+        })
+
+        return True
+
+    async def set_plan_mode(self, session_id: str, enabled: bool) -> bool:
+        """Enable or disable plan mode for a session."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        session.plan_mode_active = enabled
+        if not enabled:
+            session.proposed_plan = None
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "plan_mode_changed",
+            "enabled": enabled,
+        })
+
+        return True
+
+    async def approve_plan(self, session_id: str) -> bool:
+        """Approve the proposed plan and exit plan mode."""
+        session = self.sessions.get(session_id)
+        if not session or not session.plan_mode_active:
+            return False
+
+        # Exit plan mode (keep the proposed plan for reference)
+        session.plan_mode_active = False
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "plan_approved",
+            "plan": session.proposed_plan,
+        })
+
+        await self._broadcast_to_session(session_id, {
+            "type": "plan_mode_changed",
+            "enabled": False,
+        })
+
+        return True
+
+    async def set_model(self, session_id: str, model_id: str) -> bool:
+        """Change the model for a session."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        session.model = model_id
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "model_changed",
+            "model": model_id,
+        })
+
+        return True
+
+    async def set_budget(self, session_id: str, budget_usd: float | None) -> bool:
+        """Set budget limit for a session."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        session.budget_usd = budget_usd
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "budget_changed",
+            "budget_usd": budget_usd,
+        })
+
+        return True
+
+    # === DeepAgents Methods ===
+
+    async def _process_deepagents_conversation(
+        self,
+        session: Session,
+        prompt: str,
+        system_prompt: str | None = None,
+    ):
+        """Process conversation with DeepAgents engine."""
+        session.state = SessionState.THINKING
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session.id, {
+            "type": "state_change",
+            "state": session.state.value,
+        })
+
+        try:
+            from deepagents import create_deep_agent
+            from langchain_anthropic import ChatAnthropic
+
+            # Create model
+            model = ChatAnthropic(
+                model=session.model,
+                temperature=0.7,
+            )
+
+            # Build system prompt
+            effective_system_prompt = system_prompt or session.system_prompt or ""
+
+            # Add loaded skills to system prompt
+            if session.loaded_skills:
+                skill_prompts = await self._load_skill_prompts(session)
+                if skill_prompts:
+                    effective_system_prompt = f"{effective_system_prompt}\n\n{skill_prompts}"
+
+            # Create DeepAgents agent
+            agent = create_deep_agent(
+                model=model,
+                system_prompt=effective_system_prompt,
+            )
+            session._deepagent = agent
+
+            # Build messages history
+            messages = []
+            for msg in session.messages:
+                if msg.role == MessageRole.USER:
+                    for block in msg.content:
+                        if block.type == "text":
+                            messages.append({"role": "user", "content": block.content})
+                elif msg.role == MessageRole.ASSISTANT:
+                    for block in msg.content:
+                        if block.type == "text":
+                            messages.append({"role": "assistant", "content": block.content})
+
+            # Process with streaming
+            current_text = ""
+            current_thinking = ""
+            current_blocks: list[ContentBlock] = []
+            emitted_tools: set[str] = set()
+
+            async for chunk in agent.astream(
+                {"messages": messages},
+                stream_mode="values",
+            ):
+                if session.state == SessionState.INTERRUPTED:
+                    break
+
+                # Parse LangGraph chunk
+                if "messages" in chunk and chunk["messages"]:
+                    last_msg = chunk["messages"][-1]
+
+                    # Handle text content
+                    if hasattr(last_msg, "content"):
+                        content = last_msg.content
+                        if isinstance(content, str) and content != current_text:
+                            delta = content[len(current_text):]
+                            current_text = content
+                            if delta:
+                                await self._broadcast_to_session(session.id, {
+                                    "type": "stream",
+                                    "stream_type": "text",
+                                    "content": delta,
+                                })
+
+                    # Handle tool calls
+                    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                        session.state = SessionState.TOOL_EXECUTING
+                        await self._broadcast_to_session(session.id, {
+                            "type": "state_change",
+                            "state": session.state.value,
+                        })
+
+                        for tc in last_msg.tool_calls:
+                            tool_id = tc.get("id", str(uuid.uuid4())[:8])
+                            if tool_id not in emitted_tools:
+                                emitted_tools.add(tool_id)
+                                tool_name = tc.get("name", "unknown")
+                                tool_args = tc.get("args", {})
+
+                                # Track file operations
+                                if tool_name in ["write_file", "edit_file", "read_file", "glob", "grep", "execute"]:
+                                    file_op = FileOperation(
+                                        id=tool_id,
+                                        operation=tool_name,
+                                        path=tool_args.get("path", tool_args.get("pattern", "")),
+                                        content_preview=str(tool_args)[:500],
+                                    )
+                                    session.file_operations.append(file_op)
+                                    await self._broadcast_to_session(session.id, {
+                                        "type": "file_operation",
+                                        "operation": file_op.to_dict(),
+                                    })
+
+                                current_blocks.append(ContentBlock(
+                                    type="tool_use",
+                                    content=tool_args,
+                                    tool_id=tool_id,
+                                    tool_name=tool_name,
+                                ))
+
+                                await self._broadcast_to_session(session.id, {
+                                    "type": "tool_use",
+                                    "tool_id": tool_id,
+                                    "tool_name": tool_name,
+                                    "tool_input": tool_args,
+                                })
+
+                    # Handle additional kwargs (thinking)
+                    if hasattr(last_msg, "additional_kwargs"):
+                        thinking = last_msg.additional_kwargs.get("thinking")
+                        if thinking and thinking != current_thinking:
+                            delta = thinking[len(current_thinking):]
+                            current_thinking = thinking
+                            if delta:
+                                await self._broadcast_to_session(session.id, {
+                                    "type": "stream",
+                                    "stream_type": "thinking",
+                                    "content": delta,
+                                })
+
+                # Handle todos from middleware
+                if "todos" in chunk:
+                    session.todos = [
+                        TodoItem(
+                            id=t.get("id", str(uuid.uuid4())[:8]),
+                            content=t.get("content", ""),
+                            status=t.get("status", "pending"),
+                            priority=t.get("priority", 0),
+                        )
+                        for t in chunk["todos"]
+                    ]
+                    await self._broadcast_to_session(session.id, {
+                        "type": "todos_update",
+                        "todos": [t.to_dict() for t in session.todos],
+                    })
+
+                # Handle usage info
+                if hasattr(chunk, "usage"):
+                    usage = chunk.usage
+                    if usage:
+                        session.input_tokens += usage.get("input_tokens", 0)
+                        session.output_tokens += usage.get("output_tokens", 0)
+                        await self._broadcast_to_session(session.id, {
+                            "type": "token_usage",
+                            "input_tokens": session.input_tokens,
+                            "output_tokens": session.output_tokens,
+                        })
+
+            # Finalize assistant message
+            if current_text:
+                current_blocks.insert(0, ContentBlock(type="text", content=current_text))
+            if current_thinking:
+                current_blocks.insert(0, ContentBlock(type="thinking", content=current_thinking))
+
+            if current_blocks:
+                assistant_msg = Message(
+                    id=str(uuid.uuid4())[:8],
+                    role=MessageRole.ASSISTANT,
+                    content=current_blocks,
+                    metadata={
+                        "input_tokens": session.input_tokens,
+                        "output_tokens": session.output_tokens,
+                    },
+                )
+                session.messages.append(assistant_msg)
+
+                await self._broadcast_to_session(session.id, {
+                    "type": "message",
+                    "message": assistant_msg.to_dict(),
+                })
+
+            session.state = SessionState.COMPLETED
+
+            await self._broadcast_to_session(session.id, {
+                "type": "result",
+                "input_tokens": session.input_tokens,
+                "output_tokens": session.output_tokens,
+            })
+
+        except asyncio.CancelledError:
+            session.state = SessionState.INTERRUPTED
+            await self._broadcast_to_session(session.id, {
+                "type": "interrupted",
+            })
+
+        except Exception as e:
+            session.state = SessionState.ERROR
+            await self._broadcast_to_session(session.id, {
+                "type": "error",
+                "error": str(e),
+            })
+
+        finally:
+            session.updated_at = datetime.now()
+            session._deepagent = None
+
+            await self._broadcast_to_session(session.id, {
+                "type": "state_change",
+                "state": session.state.value,
+            })
+
+    async def _load_skill_prompts(self, session: Session) -> str:
+        """Load skill prompts for loaded skills."""
+        prompts = []
+        for skill_name in session.loaded_skills:
+            skill_path = Path(session.cwd) / ".arche" / "skills" / skill_name / "skill.yaml"
+            if skill_path.exists():
+                try:
+                    import yaml
+                    with open(skill_path) as f:
+                        skill_data = yaml.safe_load(f)
+                    if skill_data and skill_data.get("system_prompt"):
+                        prompts.append(f"# Skill: {skill_name}\n{skill_data['system_prompt']}")
+                except Exception:
+                    pass
+        return "\n\n".join(prompts)
+
+    async def update_todos(self, session_id: str, todos: list[dict]) -> bool:
+        """Update session todos and broadcast."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        session.todos = [
+            TodoItem(
+                id=t.get("id", str(uuid.uuid4())[:8]),
+                content=t.get("content", ""),
+                status=t.get("status", "pending"),
+                priority=t.get("priority", 0),
+            )
+            for t in todos
+        ]
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "todos_update",
+            "todos": [t.to_dict() for t in session.todos],
+        })
+
+        return True
+
+    async def add_todo(self, session_id: str, content: str, priority: int = 0) -> TodoItem | None:
+        """Add a new todo item."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return None
+
+        todo = TodoItem(
+            id=str(uuid.uuid4())[:8],
+            content=content,
+            status="pending",
+            priority=priority,
+        )
+        session.todos.append(todo)
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "todos_update",
+            "todos": [t.to_dict() for t in session.todos],
+        })
+
+        return todo
+
+    async def update_todo_status(self, session_id: str, todo_id: str, status: str) -> bool:
+        """Update a todo item's status."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        for todo in session.todos:
+            if todo.id == todo_id:
+                todo.status = status
+                if status == "completed":
+                    todo.completed_at = datetime.now()
+                break
+        else:
+            return False
+
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "todos_update",
+            "todos": [t.to_dict() for t in session.todos],
+        })
+
+        return True
+
+    async def delete_todo(self, session_id: str, todo_id: str) -> bool:
+        """Delete a todo item."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        session.todos = [t for t in session.todos if t.id != todo_id]
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "todos_update",
+            "todos": [t.to_dict() for t in session.todos],
+        })
+
+        return True
+
+    async def load_skill(self, session_id: str, skill_name: str) -> bool:
+        """Load a skill into the session."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        if skill_name in session.loaded_skills:
+            return True  # Already loaded
+
+        # Verify skill exists
+        skill_path = Path(session.cwd) / ".arche" / "skills" / skill_name / "skill.yaml"
+        if not skill_path.exists():
+            return False
+
+        session.loaded_skills.append(skill_name)
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "skill_loaded",
+            "skill_name": skill_name,
+            "loaded_skills": session.loaded_skills,
+        })
+
+        return True
+
+    async def unload_skill(self, session_id: str, skill_name: str) -> bool:
+        """Unload a skill from the session."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        if skill_name not in session.loaded_skills:
+            return False
+
+        session.loaded_skills.remove(skill_name)
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "skill_unloaded",
+            "skill_name": skill_name,
+            "loaded_skills": session.loaded_skills,
+        })
+
+        return True
+
+    async def set_capabilities(self, session_id: str, capabilities: list[str]) -> bool:
+        """Update session capabilities."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        session.enabled_capabilities = capabilities
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "capabilities_changed",
+            "capabilities": capabilities,
+        })
+
+        return True
+
+    async def set_engine(self, session_id: str, engine: str) -> bool:
+        """Change the engine for a session."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        if engine not in ("claude_sdk", "deepagents"):
+            return False
+
+        session.engine = engine
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "engine_changed",
+            "engine": engine,
+        })
+
+        return True
+
+    async def approve_file_operation(self, session_id: str, op_id: str) -> bool:
+        """Approve a pending file operation."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        for op in session.file_operations:
+            if op.id == op_id:
+                op.approved = True
+                break
+        else:
+            return False
+
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "file_operation_approved",
+            "op_id": op_id,
+        })
+
+        return True
+
+    async def reject_file_operation(self, session_id: str, op_id: str, reason: str = "") -> bool:
+        """Reject a pending file operation."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        for op in session.file_operations:
+            if op.id == op_id:
+                op.result = f"Rejected: {reason}" if reason else "Rejected"
+                break
+        else:
+            return False
+
+        session.updated_at = datetime.now()
+
+        await self._broadcast_to_session(session_id, {
+            "type": "file_operation_rejected",
+            "op_id": op_id,
+            "reason": reason,
+        })
+
+        return True
 
 
 # Global session manager instance

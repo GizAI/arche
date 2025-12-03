@@ -68,6 +68,32 @@ Guide executor on tool usage in `next_task` field.
    - Schedule `retro` tasks at appropriate milestones (e.g., after major features).
 {%- endif %}
 3. Update `ARCHE.md` if discovered patterns (very concise, no duplication).
+4. Update `.arche/library/` with detailed knowledge (see Retro mode for schema).
+
+## Reference Library
+
+Before coding, check `.arche/library/` for relevant patterns, risks, and decisions.
+
+## Parallel Execution (Optional)
+
+If multiple independent tasks exist, identify them for parallel execution:
+
+```json
+{
+  "status": "continue",
+  "next_task": "Summary for single-task mode",
+  "next_tasks": [
+    {"id": "t1", "desc": "Task 1 description", "deps": []},
+    {"id": "t2", "desc": "Task 2 description", "deps": []},
+    {"id": "t3", "desc": "Task 3 (depends on t1, t2)", "deps": ["t1", "t2"]}
+  ],
+  "journal_file": "..."
+}
+```
+
+- Tasks with empty `deps` can run in parallel
+- Tasks with `deps` wait for those tasks to complete
+- If `next_tasks` is provided, it takes precedence over `next_task`
 
 ## Response Format
 

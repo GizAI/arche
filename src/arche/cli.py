@@ -25,9 +25,10 @@ app = typer.Typer(name="arche", help="Long-lived coding agent.", no_args_is_help
 LOG, PID, SERVER_PID, STATE = "arche.log", "arche.pid", "server.pid", "state.json"
 TEMPLATES = ["RULE_EXEC.md", "RULE_REVIEW.md", "RULE_RETRO.md", "RULE_COMMON.md", "PROMPT.md", "CHECKLIST.yaml"]
 INFINITE, FORCE_REVIEW, FORCE_RETRO, STEP_MODE = "infinite", "force_review", "force_retro", "step"
+PENDING_APPROVAL, APPROVAL_RESPONSE = "pending_approval.json", "approval_response.json"
 PKG_DIR = Path(__file__).parent
 TPL_DIR = PKG_DIR / "templates"
-DIRS = ["journal", "plan", "plan/archive", "feedback", "feedback/archive", "retrospective", "tools", "templates"]
+DIRS = ["journal", "plan", "plan/archive", "feedback", "feedback/archive", "retrospective", "tools", "templates", "library"]
 
 # Tool arg display keys
 TOOL_ARG_KEYS = {
@@ -167,15 +168,19 @@ def start_daemon(arche_dir: Path):
 
 
 def start_session(arche_dir: Path, goal: str, engine: str, model: str | None,
-                  plan_mode: bool, infinite: bool, step: bool, retro_every: str):
+                  plan_mode: bool, infinite: bool, step: bool, retro_every: str,
+                  approval: bool = False):
     """Initialize and start a new agent session."""
     init_arche_dir(arche_dir)
-    write_state(arche_dir, {
+    state = {
         "engine": {"type": engine, "kwargs": {"model": model} if model else {}},
         "retro_every": retro_every,
         "turn": 1,
         "plan_mode": plan_mode,
-    })
+    }
+    if approval:
+        state["approval"] = {"enabled": True, "modes": ["plan", "review", "retro"]}
+    write_state(arche_dir, state)
     add_feedback(arche_dir, goal, "goal")
 
     (arche_dir / INFINITE).touch() if infinite else (arche_dir / INFINITE).unlink(missing_ok=True)
@@ -328,6 +333,94 @@ def format_tool_args(name: str, args: dict | None) -> str:
     return ""
 
 
+# === Parallel Execution ===
+
+async def execute_parallel_tasks(
+    tasks: list[dict],
+    arche_dir: Path,
+    engine_type: str,
+    engine_kwargs: dict,
+    log_file: Path,
+    max_concurrent: int = 3,
+) -> list[dict]:
+    """Execute independent tasks in parallel.
+
+    Args:
+        tasks: List of {id, desc, deps} dicts
+        arche_dir: .arche directory
+        engine_type: Engine type (e.g., claude_sdk)
+        engine_kwargs: Engine kwargs
+        log_file: Log file path
+        max_concurrent: Max concurrent tasks
+
+    Returns:
+        List of results {task_id, status, output, error}
+    """
+    semaphore = asyncio.Semaphore(max_concurrent)
+    results = []
+    completed = set()
+
+    async def run_task(task: dict) -> dict:
+        task_id = task.get("id", "unknown")
+        desc = task.get("desc", "")
+
+        async with semaphore:
+            with open(log_file, "a") as f:
+                f.write(f"\n\033[36m▸ Parallel [{task_id}]\033[0m {desc[:50]}...\n")
+                f.flush()
+
+            try:
+                engine = create_engine(engine_type, **engine_kwargs)
+                system_prompt = build_system_prompt(arche_dir, "exec")
+                output = ""
+
+                async for event in engine.run(goal=desc, system_prompt=system_prompt):
+                    if event.type == EventType.CONTENT and event.content:
+                        output += event.content
+
+                completed.add(task_id)
+                return {"task_id": task_id, "status": "completed", "output": output[-500:]}
+
+            except Exception as e:
+                return {"task_id": task_id, "status": "failed", "error": str(e)}
+
+    # Group by dependencies
+    ready = [t for t in tasks if not t.get("deps")]
+    pending = [t for t in tasks if t.get("deps")]
+
+    # Execute ready tasks in parallel
+    if ready:
+        with open(log_file, "a") as f:
+            f.write(f"\n\033[33m{'━'*50}\033[0m\n")
+            f.write(f"\033[1;33m◆ Parallel Execution\033[0m ({len(ready)} tasks)\n")
+            f.write(f"\033[33m{'━'*50}\033[0m\n")
+            f.flush()
+
+        batch_results = await asyncio.gather(*[run_task(t) for t in ready])
+        results.extend(batch_results)
+
+    # Execute pending tasks (deps satisfied) sequentially for now
+    for task in pending:
+        deps = task.get("deps", [])
+        if all(d in completed for d in deps):
+            result = await run_task(task)
+            results.append(result)
+        else:
+            results.append({
+                "task_id": task.get("id"),
+                "status": "blocked",
+                "error": f"Deps not met: {deps}"
+            })
+
+    # Log summary
+    with open(log_file, "a") as f:
+        success = sum(1 for r in results if r["status"] == "completed")
+        f.write(f"\n\033[32m✓ Parallel done:\033[0m {success}/{len(results)} succeeded\n")
+        f.flush()
+
+    return results
+
+
 # === Main Loop ===
 
 async def run_loop(arche_dir: Path):
@@ -342,6 +435,11 @@ async def run_loop(arche_dir: Path):
     plan_mode = state.get("plan_mode", False)
     last_mode = state.get("last_mode")  # Track previous mode
     next_task, journal_file = state.get("next_task"), state.get("journal_file")
+
+    # Approval config (default: disabled)
+    approval_cfg = state.get("approval", {})
+    approval_enabled = approval_cfg.get("enabled", False)
+    approval_modes = approval_cfg.get("modes", ["plan", "review", "retro"])
 
     engine_cfg = state.get("engine", {})
     engine_type = engine_cfg.get("type", "claude_sdk")
@@ -411,6 +509,41 @@ async def run_loop(arche_dir: Path):
                 if mode in ("review", "retro", "plan"):
                     if resp := parse_response_json(output):
                         f.write(f"\n\033[2m◆ {mode.upper()}: {resp}\033[0m\n")
+
+                        # Approval gate (if enabled for this mode)
+                        if approval_enabled and mode in approval_modes:
+                            f.write(f"\n\033[33m{'━'*50}\033[0m\n")
+                            f.write(f"\033[1;33m⏳ Awaiting approval for {mode.upper()}\033[0m\n")
+                            f.write(f"\033[2mRun: arche approve | arche approve reject \"feedback\"\033[0m\n")
+                            f.write(f"\033[33m{'━'*50}\033[0m\n")
+                            f.flush()
+
+                            # Write pending approval file
+                            (arche_dir / PENDING_APPROVAL).write_text(json.dumps({
+                                "mode": mode, "result": resp, "output": output[-2000:],
+                                "created_at": datetime.now().isoformat(),
+                            }))
+
+                            # Wait for response
+                            while not (arche_dir / APPROVAL_RESPONSE).exists():
+                                await asyncio.sleep(1)
+
+                            approval = json.loads((arche_dir / APPROVAL_RESPONSE).read_text())
+                            (arche_dir / APPROVAL_RESPONSE).unlink(missing_ok=True)
+                            (arche_dir / PENDING_APPROVAL).unlink(missing_ok=True)
+
+                            action = approval.get("action", "approve")
+                            if action == "reject":
+                                feedback_msg = approval.get("feedback", "Rejected by user")
+                                f.write(f"\n\033[31m✖ Rejected:\033[0m {feedback_msg}\n")
+                                add_feedback(arche_dir, feedback_msg, "high")
+                                continue  # Re-run same mode
+                            elif action == "modify":
+                                resp = approval.get("modified_result", resp)
+                                f.write(f"\n\033[32m✓ Approved (modified)\033[0m\n")
+                            else:
+                                f.write(f"\n\033[32m✓ Approved\033[0m\n")
+
                         if not infinite and resp.get("status") == "done":
                             cl = resp.get("checklist", {})
                             missing = [k for k in load_checklist(arche_dir) if not cl.get(k)]
@@ -423,7 +556,21 @@ async def run_loop(arche_dir: Path):
                             f.write(f"\n\033[33m⚠ Done rejected:\033[0m missing {missing}\n")
                             next_task = f"Complete checklist: {missing}"
                         else:
-                            next_task = resp.get("next_task")
+                            # Check for parallel tasks
+                            if next_tasks := resp.get("next_tasks"):
+                                f.write(f"\n\033[2m◆ Parallel tasks: {len(next_tasks)}\033[0m\n")
+                                parallel_results = await execute_parallel_tasks(
+                                    tasks=next_tasks,
+                                    arche_dir=arche_dir,
+                                    engine_type=engine_type,
+                                    engine_kwargs=engine_kwargs,
+                                    log_file=log_file,
+                                )
+                                # Store results for next review
+                                state["parallel_results"] = parallel_results
+                                next_task = None  # Review will see parallel_results
+                            else:
+                                next_task = resp.get("next_task")
                         journal_file = resp.get("journal_file")
                     else:
                         f.write(f"\n\033[33m⚠ Warning:\033[0m No {mode} JSON\n")
@@ -465,6 +612,7 @@ def start(
     infinite: bool = typer.Option(False, "-i", "--infinite", help="Run infinitely"),
     step: bool = typer.Option(False, "-s", "--step", help="One task at a time"),
     retro_every: str = typer.Option("auto", "-r", "--retro-every", help="Retro schedule"),
+    approval: bool = typer.Option(False, "-a", "--approval", help="Require manual approval"),
     force: bool = typer.Option(False, "-f", "--force", help="Force restart"),
 ):
     """Start Arche with a goal."""
@@ -482,8 +630,8 @@ def start(
             if typer.confirm("Previous session exists. Reset?"):
                 reset_arche_dir(arche_dir)
 
-    start_session(arche_dir, goal_str, engine, model, plan, infinite, step, retro_every)
-    typer.echo(f"Goal: {goal_str}\nEngine: {engine}")
+    start_session(arche_dir, goal_str, engine, model, plan, infinite, step, retro_every, approval)
+    typer.echo(f"Goal: {goal_str}\nEngine: {engine}" + (" (approval: on)" if approval else ""))
     time.sleep(0.5)
     tail_log(arche_dir)
 
@@ -611,6 +759,53 @@ def feedback(
         start_daemon(arche_dir)
         time.sleep(0.5)
         tail_log(arche_dir)
+
+
+@app.command()
+def approve(
+    action: str = typer.Argument("approve", help="approve, reject, or modify"),
+    feedback: list[str] = typer.Argument(None, help="Feedback for reject"),
+    edit: bool = typer.Option(False, "-e", "--edit", help="Open editor to modify result"),
+):
+    """Respond to pending approval request."""
+    arche_dir = get_arche_dir()
+    pending_file = arche_dir / PENDING_APPROVAL
+
+    if not pending_file.exists():
+        typer.echo("No pending approval.", err=True)
+        raise typer.Exit(1)
+
+    pending = json.loads(pending_file.read_text())
+    typer.echo(f"Mode: {pending['mode'].upper()}")
+    typer.echo(f"Result: {json.dumps(pending['result'], indent=2)[:500]}")
+
+    response = {"action": action}
+
+    if action == "reject":
+        if not feedback:
+            typer.echo("Feedback required for reject.", err=True)
+            raise typer.Exit(1)
+        response["feedback"] = " ".join(feedback)
+    elif action == "modify" or edit:
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(pending["result"], f, indent=2)
+            temp_path = f.name
+
+        editor = os.environ.get("EDITOR", "nano")
+        subprocess.run([editor, temp_path])
+
+        try:
+            response["modified_result"] = json.loads(Path(temp_path).read_text())
+            response["action"] = "modify"
+        except json.JSONDecodeError:
+            typer.echo("Invalid JSON. Aborting.", err=True)
+            raise typer.Exit(1)
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
+
+    (arche_dir / APPROVAL_RESPONSE).write_text(json.dumps(response))
+    typer.echo(f"Response: {action}")
 
 
 @app.command()

@@ -1,38 +1,47 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "arche-agent"
-version = "0.3.0"
-description = "Long-lived coding agent with pluggable AI engines"
-requires-python = ">=3.10"
+name = "browser-host"
+version = "1.0.0"
+description = "Browser automation via Chrome DevTools Protocol"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Your Name", email = "your@email.com"}
+]
+keywords = ["browser", "automation", "chrome", "cdp", "devtools", "selenium", "puppeteer"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+]
 dependencies = [
-    "typer>=0.9.0",
-    "jinja2>=3.0",
-    "pyyaml>=6.0",
-    "claude-agent-sdk>=0.1.0",
-    "fastapi>=0.109.0",
-    "uvicorn[standard]>=0.27.0",
-    "websockets>=12.0",
-    "python-multipart>=0.0.6",
+    "websocket-client>=1.0.0",
+    "requests>=2.20.0",
 ]
 
 [project.optional-dependencies]
-deepagents = [
-    "deepagents>=0.1.0",
-    "langchain-anthropic>=0.1.0",
-    "langchain-openai>=0.1.0",
-]
-all = [
-    "arche-agent[deepagents]",
-]
+dev = ["pytest", "black", "mypy"]
 
 [project.scripts]
-arche = "arche.cli:app"
+browser-host = "browser.host:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/arche"]
+[project.urls]
+Homepage = "https://github.com/yourname/browser-host"
+Issues = "https://github.com/yourname/browser-host/issues"
 
-[tool.hatch.build.targets.wheel.force-include]
-"src/arche/templates" = "arche/templates"
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["browser*"]
