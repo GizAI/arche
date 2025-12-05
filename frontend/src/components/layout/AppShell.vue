@@ -1,9 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useRoute } from 'vue-router'
 import Sidebar from './Sidebar.vue'
 import StatusBar from './StatusBar.vue'
 
+const route = useRoute()
 const sidebarCollapsed = ref(false)
+
+// Hide StatusBar on interactive page for cleaner ChatGPT-style UI
+const showStatusBar = computed(() => route.path !== '/interactive')
 const sidebarOpen = ref(false)
 const isMobile = ref(false)
 
@@ -41,8 +46,8 @@ const closeSidebar = () => {
 
 <template>
   <div class="h-screen flex flex-col bg-[var(--color-bg)]">
-    <!-- Status bar at top -->
-    <StatusBar />
+    <!-- Status bar at top (hidden on interactive page) -->
+    <StatusBar v-if="showStatusBar" />
 
     <div class="flex-1 flex overflow-hidden relative">
       <!-- Mobile overlay -->

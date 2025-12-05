@@ -349,17 +349,6 @@ function toggleSidebar() {
 
     <!-- Main Content -->
     <main class="main-content" :class="{ 'has-right-panel': activeRightPanel !== 'none' }">
-      <!-- Top Bar with Extended Controls -->
-      <div v-if="activeSession" class="top-bar">
-        <div class="top-bar-left">
-          <ThinkingModeSelector />
-          <PlanModePanel v-if="planModeActive" class="plan-panel-inline" />
-        </div>
-        <div class="top-bar-right">
-          <CostTracker />
-        </div>
-      </div>
-
       <!-- Active Session Console -->
       <InteractiveConsole
         v-if="activeSession"
@@ -410,53 +399,6 @@ function toggleSidebar() {
       <CheckpointManager v-if="activeRightPanel === 'checkpoints'" />
       <MCPServerPanel v-if="activeRightPanel === 'mcp'" />
     </aside>
-
-    <!-- Bottom Toolbar -->
-    <div v-if="activeSession" class="bottom-toolbar">
-      <div class="toolbar-left">
-        <div class="permission-indicator" @click="cyclePermissionMode">
-          <span class="permission-label">{{ currentPermissionModeLabel }}</span>
-          <span class="permission-hint">shift+tab</span>
-        </div>
-      </div>
-
-      <div class="toolbar-center">
-        <button
-          class="toolbar-btn"
-          :class="{ active: activeRightPanel === 'background' }"
-          @click="toggleRightPanel('background')"
-          :title="`Background Tasks${runningTasks.length > 0 ? ` (${runningTasks.length} running)` : ''}`"
-        >
-          <span class="btn-icon">&#9881;</span>
-          <span v-if="runningTasks.length > 0" class="badge">{{ runningTasks.length }}</span>
-        </button>
-        <button
-          class="toolbar-btn"
-          :class="{ active: activeRightPanel === 'checkpoints' }"
-          @click="toggleRightPanel('checkpoints')"
-          :title="`Checkpoints (${checkpoints.length})`"
-        >
-          <span class="btn-icon">&#128247;</span>
-          <span v-if="checkpoints.length > 0" class="badge">{{ checkpoints.length }}</span>
-        </button>
-        <button
-          class="toolbar-btn"
-          :class="{ active: activeRightPanel === 'mcp' }"
-          @click="toggleRightPanel('mcp')"
-          :title="`MCP Servers (${connectedMcpServers.length} connected, ${mcpToolCount} tools)`"
-        >
-          <span class="btn-icon">&#128268;</span>
-          <span v-if="connectedMcpServers.length > 0" class="badge">{{ connectedMcpServers.length }}</span>
-        </button>
-      </div>
-
-      <div class="toolbar-right">
-        <span class="model-badge">{{ statusInfo?.model }}</span>
-        <span v-if="statusInfo?.thinkingMode !== 'normal'" class="thinking-badge">
-          {{ statusInfo?.thinkingMode }}
-        </span>
-      </div>
-    </div>
 
     <!-- Permission Modal -->
     <PermissionModal

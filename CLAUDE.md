@@ -1,1 +1,2 @@
 - 사용자의 명시적 요청없이 절대 커밋/푸시 하지마.
+- UI tasks: Design best UX first (no code), then plan implementation.

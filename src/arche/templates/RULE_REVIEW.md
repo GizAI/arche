@@ -12,9 +12,22 @@ Review the previous execution. Test thoroughly. Update plan with issues found.
 
 1. Analyze the goal thoroughly - understand requirements.
 2. Explore codebase - identify relevant files, patterns, dependencies.
-3. **Define project standards** in `ARCHE.md` at project root (see below).
-4. Create detailed plan in `.arche/plan/`.
-5. Break down into concrete, actionable tasks.
+3. **If UI-related**: UX design FIRST (see below), then implementation plan.
+4. **Define project standards** in `ARCHE.md` at project root (see below).
+5. Create detailed plan in `.arche/plan/`.
+6. Break down into concrete, actionable tasks.
+
+## UI/UX Planning (Required for UI tasks)
+
+**Order: Analyze existing UI → Design UX → Plan implementation**
+
+1. **Analyze existing UI**: Screenshot/snapshot, components, user flows, pain points.
+2. **Design UX** (pure UX, no code/tech):
+   - Information architecture, user flows, interactions
+   - Modern patterns: skeleton loading, optimistic updates, micro-interactions
+   - Accessibility, responsive strategy
+   - Benchmark best-in-class products
+3. **Plan implementation**: Based on UX design, define components and technical approach.
 
 ## Define Standards (ARCHE.md)
 
